@@ -1,0 +1,4 @@
+lu4d_sense_status	noop
+lu4d_sense_status	bank
+lu4d_status	noop
+lu4d_time_status	noop

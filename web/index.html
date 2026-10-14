@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
+<title>Lu</title>
+<meta name="description" content="Ask Lu.">
+<meta name="theme-color" content="#0b0b0c">
+<meta name="color-scheme" content="dark">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Lu">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" type="image/png" sizes="192x192" href="/icons/icon-192.png">
+<link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+
+<noscript>
+  <div class="noscript">Lu's interface needs JavaScript. Enable it and reload.</div>
+</noscript>
+
+<main id="app" class="app">
+
+  <!-- ============================ LOGIN ============================ -->
+  <section id="view-login" class="view view--login" hidden>
+    <div class="login">
+      <img class="login__mark" src="/icons/icon-192.png" alt="" width="76" height="76">
+      <h1 class="login__title">Lu</h1>
+      <p class="login__sub">Sign in to ask.</p>
+
+      <div class="seg" role="group" aria-label="Credential type">
+        <button type="button" class="seg__btn is-on" id="tab-pass" aria-pressed="true">Passphrase</button>
+        <button type="button" class="seg__btn" id="tab-invite" aria-pressed="false">Invite code</button>
+      </div>
+
+      <form id="login-form" novalidate autocomplete="on">
+        <label class="lbl" for="cred" id="cred-label">Owner passphrase</label>
+        <input class="field" id="cred" name="password" type="password"
+               autocomplete="current-password" autocapitalize="none"
+               autocorrect="off" spellcheck="false" enterkeyhint="go" required>
+        <button class="btn btn--primary" id="login-submit" type="submit">Sign in</button>
+      </form>
+
+      <p class="msg" id="login-msg" role="status" aria-live="polite"></p>
+      <p class="fine" id="login-fine">An invite code works once. Ask John for one.</p>
+    </div>
+  </section>
+
+  <!-- ============================ CHAT ============================= -->
+  <section id="view-chat" class="view view--chat" hidden>
+    <header class="bar">
+      <img class="bar__mark" src="/icons/icon-192.png" alt="" width="30" height="30">
+      <div class="bar__id">
+        <span class="bar__name">Lu</span>
+        <span class="bar__who" id="who"></span>
+      </div>
+      <button class="btn btn--ghost" id="logout" type="button">Sign out</button>
+    </header>
+
+    <div class="banner" id="banner" role="status" aria-live="polite" hidden></div>
+
+    <div class="thread" id="thread" role="log" aria-live="polite" aria-label="Conversation">
+      <div class="empty" id="empty">
+        <p class="empty__lead">Ask Lu something.</p>
+        <p class="empty__note">Lu answers from what it has actually learned. When the evidence is thin it says so instead of inventing an answer &mdash; that refusal is the point, not a fault.</p>
+      </div>
+    </div>
+
+    <textarea id="code-input" class="code-input" rows="1" placeholder="Optional: sample input for file-reading programs"></textarea>
+    <form class="composer" id="composer">
+      <textarea id="q" class="composer__input" rows="1" placeholder="Ask Lu…"
+                autocomplete="off" autocapitalize="sentences" enterkeyhint="send"></textarea>
+      <button class="btn btn--send" id="send" type="submit" aria-label="Send">
+        <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true" focusable="false">
+          <path d="M4 12h13M12 5l7 7-7 7" fill="none" stroke="currentColor"
+                stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+      </button>
+    </form>
+  </section>
+
+</main>
+
+<script src="/app.js" defer></script>
+</body>
+</html>

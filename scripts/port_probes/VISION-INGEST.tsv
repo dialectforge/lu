@@ -1,0 +1,8 @@
+lu4d_status	noop
+lu4d_pending_status	noop
+lu4d_trust_status	noop
+lu4d_freshness_status	noop
+lu4d_session_memory_status	noop
+lu4d_revoke_by_source	{"kind":"TrainingCorpus","corpus":"visual_genome","dry_run":true}
+lu4d_revoke_by_source	{"kind":"TrainingCorpus","corpus":"none-such-vg","dry_run":true}
+lu4d_revoke_by_source	{"kind":"TrainingCorpus","run_id":"none-such-run","dry_run":true}

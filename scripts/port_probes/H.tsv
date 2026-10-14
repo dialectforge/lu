@@ -1,0 +1,8 @@
+# Port H - deep reasoning chains via length-penalty relaxation
+# (Learning #578). Probes target multi-hop causal walks where the
+# relaxed penalty + Trace bonus should let typed chains beat the
+# 2-hop direct answer.
+lu4d_reason	trace from photosynthesis to atp
+lu4d_reason	how does mitochondrial respiration produce atp
+lu4d_reason	what is the chain from sunlight to glucose
+lu4d_reason	trace from subprime mortgages to recession

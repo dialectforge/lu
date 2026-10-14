@@ -1,0 +1,2063 @@
+#!/usr/bin/env python3
+"""
+Cat.1 full retrain ingest harness.
+
+Forked from scripts/ingest_curriculum_1pct.py internal notes.
+Deltas vs. 1pct:
+  - Removes the auto-scale-down to 0.1%; takes FULL slice of each Tier 1 corpus.
+  - Adds resumability via checkpoint file at /var/lib/lu/ingest_full_checkpoint.json.
+    Checkpoint records {corpus, last_saved_id, bonds_landed, errors_count, ...}
+    and is updated only after a successful lu4d_save (so the on-disk brain and
+    the checkpoint are always in sync). Resume: stream from the start of each
+    corpus and skip-and-discard until last_saved_id is reached.
+  - Per-corpus throttle: 30/s Wikipedia, 50/s Visual Genome, 30/s Tier 2.
+  - Periodic lu4d_save every ~30 min of in-corpus work (or every 5000 bonds,
+    whichever comes first); brain + WALs flushed each save.
+  - Three-tier order: Visual Genome FIRST (validates quickly), then full
+    Wikipedia, then Tier 2 (no_robots + instruction-dataset). Wikipedia-
+    structured / arXiv / StackExchange / Grokopedia are DEFERRED to follow-up.
+  - Logs to /var/lib/lu/ingest_full_progress.log with timestamp, bonds_landed,
+    corpus, errors_count, ingest_rate.
+  - On startup, writes a sentinel /var/lib/lu/ingest_full_DONE on clean exit.
+
+DEVIATIONS FROM PHASE-3 SPEC (documented per C11 demo honesty):
+  1. Subprocess.Popen pattern (inherited from 1pct), NOT mkfifo + backgrounded
+     server. The 1pct author documented this same deviation: bidirectional
+     JSON-RPC over a FIFO needs a response-matching layer that subprocess.Popen
+     gives for free. Same long-lived-server outcome; one PID to monitor.
+  2. lu4d_configure { ingest_auto_approve_threshold: 0.7 } is a no-op against
+     the current binary (md5 07a96d2…f8d, git 1d0d945) — that field is not in
+     lu4d_configure's input schema. lu4d_teach_corpus lands bonds directly with
+     no pending-queue gating in this binary. The 1pct run successfully landed
+     bonds without setting any threshold. Kept the trust hierarchy + hub caps,
+     dropped the no-op call.
+  3. wikimedia/structured-wikipedia is in the trust table but has no loader in
+     the 1pct harness; treating it as deferred along with arXiv/SE/Grokopedia.
+
+INVOCATION (BR.10b+ production retrain):
+  python3 scripts/ingest_curriculum_full.py --seed-trust
+  The --seed-trust flag is REQUIRED for production retrain. Without it,
+  corpus_multipliers stays empty and every bond resolves to
+  default_multiplier=0.4 instead of the seeded curriculum trust hierarchy.
+  Smoke runs (--smoke N) still ingest correctly without --seed-trust;
+  bonds just land at the 0.4 default. Use --seed-trust on smoke runs too
+  if you want to validate trust-resolved weights end-to-end.
+
+Resumability semantics:
+  - The checkpoint represents the last KNOWN-PERSISTED position. After a
+    successful lu4d_save, the checkpoint is updated to record the last
+    processed corpus id at the time of save. On crash, restart of this
+    harness re-spawns the MCP server (which loads brain at last-saved state)
+    and skips the stream forward to last_saved_id. Up to ~30 min of
+    redundant streaming may occur on resume; bonds are not double-counted at
+    the brain level because the MCP server reloaded from a clean save point.
+"""
+
+import argparse
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+from datetime import datetime, timezone
+
+# Phase B (2026-05-07): smart extractor v2 (iter-4, subject-anchored).
+# Adds six-layer Wikipedia bond extraction. The old
+# extract_wikipedia_bonds function is preserved below for reference
+# but is no longer the call site -- ingest_wikipedia uses
+# extract_bonds_from_wikipedia_article instead. K-gate, trust weights,
+# checkpoint logic, hub caps and BatchSink are all unchanged.
+import sys as _sys, os as _os
+_SCRIPTS_DIR = _os.path.dirname(_os.path.abspath(__file__))
+if _SCRIPTS_DIR not in _sys.path:
+    _sys.path.insert(0, _SCRIPTS_DIR)
+from smart_extractor import extract_bonds_from_wikipedia_article
+
+PROGRESS_LOG = "/var/lib/lu/ingest_full_progress.log"
+CHECKPOINT   = "/var/lib/lu/ingest_full_checkpoint.json"
+DONE_SENTINEL = "/var/lib/lu/ingest_full_DONE"
+
+RUN_TIMESTAMP = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+RUN_ID_TIER1  = f"cat1-retrain-tier1-{RUN_TIMESTAMP}"
+RUN_ID_TIER2  = f"cat1-retrain-tier2-{RUN_TIMESTAMP}"
+
+# Per-corpus pacing caps (calls/sec). Effective rate is min(cap, capability_rate).
+THROTTLE_WIKIPEDIA = 30.0
+THROTTLE_VG        = 50.0
+THROTTLE_TIER2     = 30.0
+
+# Periodic-save policy: whichever fires first.
+SAVE_INTERVAL_SEC  = 30 * 60
+SAVE_INTERVAL_BONDS = 50000
+
+
+class Throttle:
+    def __init__(self, rate_hz):
+        self.min_interval = 1.0 / rate_hz
+        self.last = 0.0
+    def wait(self):
+        now = time.monotonic()
+        sleep_for = self.last + self.min_interval - now
+        if sleep_for > 0:
+            time.sleep(sleep_for)
+        self.last = time.monotonic()
+
+
+# Port BatchIngest -- see lu4d_teach_corpus_batch in src/mcp.rs.
+# Cap is enforced server-side at TEACH_CORPUS_BATCH_MAX_ENTRIES=1000.
+# 100 is 10x headroom; gives ~1.5kB-3kB JSON-RPC payloads per batch.
+BATCH_SIZE = 100
+
+
+# =====================================================================
+# CORPUS ATTRIBUTION (BR.5 audit P1 #2 -- internal notes:
+#
+# Every entry submitted via BatchSink.add MUST include a 'corpus' key.
+# It is set BY THIS FILE -- the harness/ingest wrapper -- at each
+# sink.add({...}) call-site, NOT by the BondSink/sink layer and NOT
+# by the bond extractor. The smart_extractor and visual_genome_loader
+# emit (subject, relation, object) triples with no corpus opinion;
+# the 'corpus' string is stamped in by the per-corpus ingest function
+# below (ingest_visual_genome / ingest_wikipedia / ingest_tier2_dataset)
+# using the local corpus_id constant declared at the top of that
+# function.
+#
+# Values stamped today (must stay in sync with revoke_by_source
+# selectors and with the corpus enum in lu_4_mcp's TrainingCorpus
+# allow-list):
+#   - 'ranjaykrishna/visual_genome' (ingest_visual_genome,  Tier 1 vision; matches TrustTable::seed_curriculum_corpora key)
+#   - 'wikimedia/wikipedia'   (ingest_wikipedia,      Tier 1 text)
+#   - <Tier 2 dataset_repo>   (ingest_tier2_dataset,  e.g.
+#     'HuggingFaceH4/no_robots', 'HuggingFaceH4/instruction-dataset')
+#
+# The server (lu_4_mcp's tool_teach_corpus) requires 'corpus' as a
+# required JSON arg and stamps SourceAttribution::TrainingCorpus
+# with it. Brain rejects entries that arrive with corpus='<unknown>'
+# (the default sentinel) -- this file's invariant is what keeps
+# attribution non-empty in canonical.
+#
+# WHY THIS MATTERS FOR FUTURE REFACTORS: lu4d_revoke_by_source uses
+# 'corpus' as a primary selector (see src/mcp.rs tool_revoke_by_source
+# 'training_corpus'/'document' branches). If a future refactor lifts
+# the stamp into a wrapper, decorator, or BatchSink default that
+# silently drops it on one path, EVERY bond from that path becomes
+# unrevokable by corpus -- attribution silently breaks. Audit the
+# call-sites below before changing this file.
+# =====================================================================
+class BatchSink:
+    """Buffer-and-submit wrapper around lu4d_teach_corpus_batch.
+
+    Maintains a per-process seen_triples set for Python-side dedup --
+    skips submission entirely when (subject, relation, object) was
+    already submitted in this process. The set does NOT persist
+    across daemon restarts; checkpoint resume + lu_4_mcp's per-bond
+    dedup (existing-edge reinforcement) catch any duplicates that
+    re-submit on resume.
+
+    Anti-bypass invariant: each entry in `add()` is submitted via the
+    SAME lu4d_teach_corpus_batch tool; that tool routes per-entry
+    through tool_teach_corpus, which goes through brain.teach_corpus
+    (T.3 gating + TrainingCorpus stamping). The batch is purely an
+    IPC speedup -- no per-bond logic is bypassed.
+    """
+
+    def __init__(self, client, throttle, batch_size=BATCH_SIZE):
+        self.client = client
+        self.throttle = throttle
+        self.batch_size = batch_size
+        self.buffer = []
+        self.seen = set()
+        # Cumulative counters --- mirror response structuredContent.
+        self.bonds_landed = 0       # new bonds from response
+        self.bonds_existing = 0     # reinforced existing bonds
+        self.bonds_gated = 0        # T.3 PendingLog (below threshold)
+        self.bonds_errors = 0       # per-entry errors + whole-batch failures
+        self.bonds_skipped_dedup = 0  # Python-side dedup hits
+
+    def add(self, entry):
+        """Buffer one entry. Returns False if Python-side dedup skipped
+        it OR the entry was malformed; True if it was queued."""
+        s = entry.get("subject"); r = entry.get("relation"); o = entry.get("object")
+        if not s or not r or not o:
+            self.bonds_errors += 1
+            return False
+        key = (s, r, o)
+        if key in self.seen:
+            self.bonds_skipped_dedup += 1
+            return False
+        self.seen.add(key)
+        self.buffer.append(entry)
+        if len(self.buffer) >= self.batch_size:
+            self.flush()
+        return True
+
+    def flush(self):
+        """Submit the current buffer in one IPC call. No-op if empty."""
+        if not self.buffer:
+            return
+        n = len(self.buffer)
+        self.throttle.wait()
+        try:
+            resp = self.client.call("lu4d_teach_corpus_batch", {"entries": self.buffer})
+            if call_ok(resp):
+                sc = ((resp.get("result") or {}).get("structuredContent") or {})
+                self.bonds_landed   += int(sc.get("bonds_landed", 0))
+                self.bonds_existing += int(sc.get("bonds_deduped", 0))
+                self.bonds_gated    += int(sc.get("bonds_gated", 0))
+                errs = sc.get("errors") or []
+                self.bonds_errors   += len(errs)
+            else:
+                # Whole-batch failure -- count every queued entry.
+                self.bonds_errors += n
+        except Exception:
+            self.bonds_errors += n
+        finally:
+            self.buffer = []
+
+
+# OP-011 (2026-05-11): McpChildDied -- raise when the lu_4_mcp child dies.
+# Inherits SystemExit so it propagates past `except Exception:` blocks in
+# BatchSink.flush etc. and exits the parent process with a non-zero code,
+# letting systemd Restart=on-failure pick up the runner cleanly.
+class McpChildDied(SystemExit):
+    pass
+
+
+class McpClient:
+    def __init__(self, brain_path, keyfile, log_stderr_to=None):
+        self.brain_path = brain_path
+        self.keyfile = keyfile
+        self._stderr = open(log_stderr_to, "ab") if log_stderr_to else subprocess.DEVNULL
+        # OP-022.eh: glibc arena tuning for the lu_4_mcp child.
+        # MALLOC_ARENA_MAX=2 caps glibc to 2 arenas (default = nproc, often 8-32)
+        # to reduce cross-save fragmentation. MALLOC_TRIM_THRESHOLD_=131072 (128 KiB)
+        # makes glibc more aggressive about returning freed pages to the OS instead
+        # of retaining them in the arena. Both env vars must be set BEFORE glibc
+        # initializes in the child process; passing them via Popen.env (which
+        # becomes the child execve environment) achieves that.
+        op022eh_env = os.environ.copy()
+        op022eh_env.setdefault("MALLOC_ARENA_MAX", "2")
+        op022eh_env.setdefault("MALLOC_TRIM_THRESHOLD_", "131072")
+        self.proc = subprocess.Popen(
+            # Daemon Perf-2 (2026-05-07): pass --no-save so the daemon does
+            # NOT autosave the full brain after every tools/call. Saves are
+            # still controlled by the harness via _maybe_save (every
+            # SAVE_INTERVAL_BONDS or SAVE_INTERVAL_SEC) and the explicit
+            # lu4d_save at the end of each ingest_* function. Per-batch
+            # autosave was writing 944 MB/save and dominating wall time
+            # (~16 sec/batch, ~0.11 art/sec). With --no-save the same
+            # round-trip is ~0.25 sec (~7 art/sec). Crash safety is preserved
+            # by checkpoint resume: bonds added between saves are re-formed
+            # by re-extracting from last_saved_id+1.
+            ["/usr/local/bin/lu_4_mcp", "--mcp", "--require-encrypted",
+             "--keyfile", keyfile, "--brain", brain_path,
+             "--brain-format-out", "v3enc",
+             "--no-save"],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=self._stderr,
+            bufsize=1, text=True,
+            env=op022eh_env,
+        )
+        self._next_id = 1
+        self._init()
+    def _send(self, obj):
+        # OP-011: detect child death before write so a dead pipe converts
+        # into McpChildDied (SystemExit) rather than a swallowed BrokenPipeError.
+        rc = self.proc.poll()
+        if rc is not None:
+            try: log_progress(f"OP-011 McpChildDied on _send: returncode={rc}")
+            except Exception: pass
+            raise McpChildDied(f"lu_4_mcp child died (returncode={rc}) before _send")
+        try:
+            self.proc.stdin.write(json.dumps(obj) + "\n")
+            self.proc.stdin.flush()
+        except (BrokenPipeError, OSError) as e:
+            rc = self.proc.poll()
+            try: log_progress(f"OP-011 McpChildDied on _send write: rc={rc} err={e}")
+            except Exception: pass
+            raise McpChildDied(f"lu_4_mcp child died during _send (returncode={rc}, err={e})")
+    def _recv(self):
+        # OP-011: empty readline means child closed stdout (typically died).
+        # Convert to McpChildDied so the parent exits cleanly for systemd restart.
+        line = self.proc.stdout.readline()
+        if not line:
+            rc = self.proc.poll()
+            try: log_progress(f"OP-011 McpChildDied on _recv: empty line, returncode={rc}")
+            except Exception: pass
+            raise McpChildDied(f"lu_4_mcp child closed stdout (returncode={rc})")
+        return json.loads(line)
+    def _init(self):
+        self._send({"jsonrpc":"2.0","id":self._next_id,"method":"initialize",
+                    "params":{"protocolVersion":"2024-11-05","capabilities":{},
+                             "clientInfo":{"name":"ingest-full","version":"0.1"}}})
+        self._next_id += 1
+        self._recv()
+        self._send({"jsonrpc":"2.0","method":"notifications/initialized"})
+    def call(self, name, args):
+        rid = self._next_id
+        self._next_id += 1
+        self._send({"jsonrpc":"2.0","id":rid,"method":"tools/call",
+                    "params":{"name":name,"arguments":args}})
+        return self._recv()
+    def close(self):
+        try:
+            if self.proc.stdin and not self.proc.stdin.closed:
+                self.proc.stdin.close()
+            self.proc.wait(timeout=600)
+        except Exception:
+            self.proc.kill()
+        finally:
+            if hasattr(self._stderr, "close"):
+                try: self._stderr.close()
+                except: pass
+
+
+def log_progress(line):
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    try:
+        with open(PROGRESS_LOG, "a") as f:
+            f.write(f"{ts} {line}\n"); f.flush()
+    except Exception:
+        pass
+    print(f"[{ts}] {line}", flush=True)
+
+
+def call_ok(resp):
+    return isinstance(resp, dict) and "error" not in resp
+
+
+# ---- checkpoint ----
+
+def load_checkpoint():
+    if not os.path.exists(CHECKPOINT):
+        return {}
+    try:
+        with open(CHECKPOINT) as f:
+            return json.load(f)
+    except Exception as e:
+        log_progress(f"WARNING: checkpoint load failed: {e}; starting fresh")
+        return {}
+
+def save_checkpoint(cp):
+    cp["updated_at"] = datetime.now(timezone.utc).isoformat()
+    tmp = CHECKPOINT + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(cp, f, indent=2)
+    os.replace(tmp, CHECKPOINT)
+
+
+# ---- bond extraction (same as 1pct) ----
+
+IS_A_PATTERN = re.compile(
+    r"\b(?:is|was|are|were)\s+(?:an?|the)\s+([a-z][\w\s\-]{2,60}?)\s+(?:that|which|who|where|in|of|on|located|known|used|with|by|for|from|to|and|\.|,|;)",
+    re.IGNORECASE,
+)
+
+def first_sentence(text):
+    if not text: return ""
+    m = re.match(r"([^.!?\n]{20,400}[.!?])", text.strip())
+    return m.group(1).strip() if m else text.strip()[:200]
+
+def extract_wikipedia_bonds(title, text, source_url):
+    bonds = []
+    if not text or not title: return bonds
+    lead = first_sentence(text)
+    if not lead: return bonds
+    # Phase-1 (2026-05-30): the legacy (title, RelatedTo, lead[:200])
+    # emission was structurally self-referential noise — the lead sentence
+    # is ABOUT the title, not a separate entity it relates to. Removed.
+    # IS_A_PATTERN below provides typed-relation coverage cleanly.
+    m = IS_A_PATTERN.search(lead)
+    if m:
+        cat = m.group(1).strip().rstrip(",.;:").lower()
+        if 2 <= len(cat) <= 60:
+            bonds.append((title, "IsA", cat, 0.6, "Inferred"))
+    return bonds
+
+# Lu BR.8b -- asymmetry fix attempt 2
+# Two patterns only (A: determiner-led NP, B: capitalized-leading NP), each
+# requiring a predicate verb to follow. If neither matches the first sentence
+# of the response, return None and drop the bond at the call site -- correct
+# behavior for non-declarative responses (lists, code, imperatives, etc.).
+#
+# A blacklist on the NP head filters out WH-interrogatives (what/who/when/...),
+# bare pronouns (it/he/she/they/...), demonstrative pronouns (this/that/...),
+# existential/locative (there/here), and common sentence-initial discourse
+# markers (however/therefore/moreover/...). Without this filter, Pattern B
+# would match "What is X?" -> "What" (interrogative leakage, hard fail).
+
+_DETS_RE = r"(?:[Tt]he|[Aa]n?|[Tt]his|[Tt]hat|[Tt]hese|[Tt]hose|[Mm]y|[Yy]our|[Hh]is|[Hh]er|[Ii]ts|[Oo]ur|[Tt]heir|[Ss]ome|[Aa]ny|[Ee]ach|[Ee]very|[Aa]ll|[Bb]oth|[Nn]o)"
+
+_PRED_RE = r"(?:is|was|are|were|be|being|been|am|has|have|had|does|do|did|will|would|should|could|can|may|might|must|means|refers|denotes|represents|includes|contains|involves|consists|comprises|signifies|describes|equals|defines|marks|originates|derives|originated|derived|occurred|happens|happened|exists|existed|came|comes|became|becomes|remains|stayed|stays|stood|stands)"
+
+_PAT_A_RESP = re.compile(
+    # BR.9 + BR.10b: NP-greedy fix -- block extra NP tokens from spanning
+    # modals (could/would/should/might/may/must) and relative-clause openers
+    # (that/which/who/whose/whom). BR.10b widens the BR.9 set after the
+    # 'might be true but you' residual surfaced in the BR.9 follow-up.
+    # Predicate verb captured in named group 'pred' for typed-relation routing.
+    r"^\s*" + _DETS_RE
+    + r"\s+([A-Za-z][\w'-]*(?:\s+(?!(?:could|would|should|might|may|must|that|which|who|whose|whom)\b)[A-Za-z][\w'-]*){0,4})\s+"
+    + r"(?P<pred>" + _PRED_RE + r")\b",
+    re.UNICODE,
+)
+
+_PAT_B_RESP = re.compile(
+    # BR.9: predicate verb captured in named group 'pred' for typed-relation routing.
+    r"^\s*([A-Z][\w'-]*(?:\s+[A-Z][\w'-]*){0,2})\s+"
+    + r"(?P<pred>" + _PRED_RE + r")\b",
+    re.UNICODE,
+)
+
+_FORBIDDEN_SUBJ_HEAD = frozenset([
+    # WH-interrogatives -- hard fail criterion
+    "what", "who", "when", "where", "why", "how", "which", "whose", "whom",
+    # Bare pronouns -- anaphoric, no semantic content
+    "it", "he", "she", "they", "we", "you", "i", "me", "us", "him", "them",
+    # Demonstrative pronouns when not used as determiners
+    "this", "that", "these", "those",
+    # Existential / locative
+    "there", "here",
+    # Sentence-initial discourse markers / fillers
+    "however", "therefore", "moreover", "furthermore", "indeed", "though",
+    "although", "because", "since", "while", "yes", "no", "well", "so",
+    "yet", "still", "anyway", "additionally", "also", "finally", "lastly",
+    "first", "second", "third", "next", "then", "now", "basically",
+    "essentially", "actually", "perhaps", "maybe",
+])
+
+# Reconciliation port (2026-05-10): bare-frame-noun subject filter promoted
+# from scripts/arxiv_loader.py internal notes. Pattern A admits
+# "This paper / The study / Our work / Our method" and captures the bare
+# meta-frame noun ("paper", "study", "work", "method") as np_text.
+# These are semantically meta and have no anchoring; the existing
+# _FORBIDDEN_SUBJ_HEAD blacklist does not cover them because they are not
+# WH-words / pronouns / discourse markers. Reject bare-frame-noun subjects
+# (whole-string equality on np_text, NOT head match -- so multi-word
+# expressions like "paper currency" or "study results" remain admitted).
+#
+# Originally caught in 2026-05-10 arxiv smoke: arxiv 2312.17258 produced
+# (subj="paper", IsA, ...) from "This paper describes a machine learning
+# approach...". Promoting the filter here (instead of leaving it loader-local)
+# means every caller of extract_response_bond benefits -- current arxiv
+# Cat.1 path, and any future declarative-frame ingest including the
+# queued Port B (first-sentence-per-paragraph extension to
+# extract_response_bond; the filter applies per-sentence so multi-paragraph
+# iteration inherits it without change).
+_FRAME_NOUN_SUBJECTS = frozenset({
+    "paper", "study", "work", "article", "manuscript", "report",
+    "thesis", "dissertation", "letter", "preprint", "draft",
+    "method", "approach", "technique", "framework", "model",
+    "system", "scheme", "algorithm", "procedure",
+    # "method" / "model" / "system" etc. are debatable: they ARE real
+    # CS nouns, but as standalone bond subjects from declarative prose
+    # they are almost always meta-frame (from "Our method", "The model",
+    # "This system" leading sentences). Cost of dropping a rare true
+    # single-word bond is low; cost of admitting frame leakage is the
+    # asymmetry-boundary failure (Cat.1 hard fail).
+})
+
+
+# ============================================================
+# Phase-1 NP truncator (2026-05-30) — replaces raw [:200] tail dumps
+# in the response-bond extractors. The pre-fix output was sentence
+# fragments, which the hub-fill synthesis port then amplified into
+# hallucination bonds. See feedback_synthesis_bounded_by_node_quality
+# in agent memory for the audit data that motivated this.
+# ============================================================
+_NP_STOP_PUNCT_RE = re.compile(r'[,;:—–]')
+_NP_STOP_CONJUNCTION_RE = re.compile(
+    r'\s+(?:because|although|while|that|which|who|where|when|if|as|since|though|so that|in order to)\s+',
+    re.IGNORECASE,
+)
+_NP_PREDICATE_VERB_RE = re.compile(
+    r'\b(?:is|was|are|were|has|have|had|will|would|could|should|did|does|do|seems|appears|became|becomes)\b',
+    re.IGNORECASE,
+)
+_NP_LEADING_VERB_RE = re.compile(r'^(?:[a-z]+(?:ed|ing))\b', re.IGNORECASE)
+
+def _truncate_to_np(text, max_len=60):
+    """Truncate a raw text fragment to a clean noun phrase.
+
+    Cuts at sentence-internal punctuation or subordinating conjunctions.
+    Hard-caps to max_len chars with word-boundary alignment. Rejects
+    (returns None) if the result still contains a predicate verb or
+    starts with a verb form — both indicate a clause fragment, not an NP.
+
+    Callers MUST drop the bond when this returns None.
+    """
+    if not text:
+        return None
+    text = text.strip().strip(',;:—–')
+    if not text:
+        return None
+    # 1. Cut at first sentence-internal punctuation.
+    m = _NP_STOP_PUNCT_RE.search(text)
+    if m:
+        text = text[:m.start()].strip()
+    if not text:
+        return None
+    # 2. Cut at first subordinating conjunction.
+    m = _NP_STOP_CONJUNCTION_RE.search(text)
+    if m:
+        text = text[:m.start()].strip()
+    if not text:
+        return None
+    # 3. Hard cap with word-boundary alignment.
+    if len(text) > max_len:
+        cut = text[:max_len].rstrip()
+        last_space = cut.rfind(' ')
+        if last_space > max_len * 0.5:
+            text = cut[:last_space].strip()
+        else:
+            text = cut
+    if not text or len(text) < 2:
+        return None
+    # 4. Reject if still contains a finite predicate verb.
+    if _NP_PREDICATE_VERB_RE.search(text):
+        return None
+    # 5. Reject if starts with a verb form (past participle / gerund).
+    if _NP_LEADING_VERB_RE.match(text):
+        return None
+    return text
+
+
+def _extract_response_subject(sentence):
+    """Return (subject_NP, predicate_verb) from a response sentence, or None.
+
+    BR.9: now returns a 2-tuple so the caller can pick a typed BondType
+    based on the predicate verb that fired Pattern A or B. Pattern guarantees
+    a non-empty pred capture.
+
+    Pattern A: determiner-led NP + predicate verb.
+        e.g. "The cat is sleeping" -> ("cat", "is")
+    Pattern B: capitalized-leading NP + predicate verb.
+        e.g. "Einstein was a physicist" -> ("Einstein", "was")
+    NP head is rejected if it's a WH-word, bare pronoun, demonstrative,
+    existential/locative, or discourse marker.
+    No fallback. Bond is dropped at the call site if this returns None.
+    """
+    if not sentence:
+        return None
+    s = sentence.strip()
+    if not s:
+        return None
+    for pat in (_PAT_A_RESP, _PAT_B_RESP):
+        m = pat.match(s)
+        if not m:
+            continue
+        np_text = m.group(1).strip()
+        if not (2 <= len(np_text) <= 80):
+            continue
+        head = np_text.split()[0].lower().strip(",.;:!?")
+        if head in _FORBIDDEN_SUBJ_HEAD:
+            continue
+        # Reconciliation port (2026-05-10): bare-frame-noun subject reject.
+        # See _FRAME_NOUN_SUBJECTS comment block above. Whole-string equality,
+        # NOT head match -- preserves multi-word NPs like "paper currency".
+        if np_text.lower().strip() in _FRAME_NOUN_SUBJECTS:
+            continue
+        pred = (m.group("pred") or "").strip().lower()
+        return (np_text, pred)
+    return None
+
+
+# BR.9 -- predicate-verb -> typed BondType mapping (Tier 2 typed-relation).
+# Phrase-anchored variants take priority over verb-only defaults so that
+# common biographical / locational / origination shapes (born in, located
+# in, named after, founded by, discovered by, written by, known for, used
+# for, part of, consists of) emit the typed BondType the smart_extractor
+# already knows about, instead of the BR.8b 100% RelatedTo monoshape.
+#
+# Mapping uses ONLY relations already present in
+# scripts/smart_extractor.py::_RELATION_TO_KIND so the Rust side parses
+# them via infer_kind_from_relation in lock-step. Anything unmatched falls
+# back to RelatedTo (correct for ambiguous prose).
+def _relation_for_pred(pred_verb, response_tail):
+    pv = (pred_verb or "").lower()
+    tail = (response_tail or "").lower()
+
+    # Phrase-anchored typed relations (refine over the verb-based default).
+    if "born in" in tail or "born on" in tail:
+        return "BornIn"
+    if ("located in" in tail or "situated in" in tail
+            or "based in" in tail or "headquartered in" in tail):
+        return "LocatedIn"
+    if ("known for" in tail or "famous for" in tail
+            or "noted for" in tail or "celebrated for" in tail):
+        return "KnownFor"
+    if ("founded by" in tail or "established by" in tail
+            or "created by" in tail or "developed by" in tail
+            or "invented by" in tail):
+        return "FoundedBy"
+    if "discovered by" in tail:
+        return "DiscoveredBy"
+    if "named after" in tail or "named for" in tail:
+        return "NamedAfter"
+    if ("used for" in tail or "used as" in tail or "used in" in tail
+            or "employed for" in tail or "employed in" in tail):
+        return "UsedFor"
+    if "part of" in tail or "member of" in tail:
+        return "PartOf"
+    if ("written by" in tail or "composed by" in tail
+            or "directed by" in tail or "designed by" in tail
+            or "produced by" in tail or "painted by" in tail):
+        return "WrittenBy"
+
+    # Verb-based defaults (no phrase-anchored cue fired).
+    if pv in {"is", "was", "are", "were", "be", "being", "been", "am",
+              "means", "refers", "denotes", "represents", "signifies",
+              "describes", "equals", "defines", "became", "becomes"}:
+        return "IsA"
+    if pv in {"has", "have", "had",
+              "remains", "stayed", "stays", "stood", "stands"}:
+        return "HasProperty"
+    if pv in {"includes", "contains", "comprises", "consists"}:
+        return "ComposedOf"
+
+    # Ambiguous prose -- preserve the BR.8b default.
+    return "RelatedTo"
+
+
+def extract_response_bond(prompt, response):
+    if not response: return None
+    s = first_sentence(response)
+    if not s or len(s) < 10: return None
+    parsed = _extract_response_subject(s)
+    if not parsed:
+        return None
+    subj, pred = parsed
+    # BR.9: typed BondType from the predicate verb that fired Pattern A/B,
+    # refined by phrase-anchored cues in the rest of the response. Replaces
+    # the BR.8b 100% RelatedTo hardcode.
+    rel = _relation_for_pred(pred, response[:600])
+    # Phase-1 (2026-05-30): extract the tail AFTER subj+pred as the
+    # object candidate, then truncate to a clean NP. Pre-fix returned
+    # `s[:200]` — the whole sentence prefix including the subject and
+    # predicate themselves, producing self-referential prose-chunk bonds.
+    tail_m = re.search(
+        re.escape(subj) + r'\s+' + re.escape(pred) + r'\s+([^.!?\n]+)',
+        s,
+        re.IGNORECASE,
+    )
+    if not tail_m:
+        return None
+    obj = _truncate_to_np(tail_m.group(1).strip())
+    if not obj:
+        return None
+    return (subj, rel, obj, 0.4, "Inferred")
+
+
+# ============================================================
+# Port B (R1) -- multi-sentence extractor for declarative corpora
+# ============================================================
+# Adds two paths the existing extract_response_bond cannot reach:
+#   - Path 1: every sentence (not just first) gets Pattern A/B
+#             via the shared _extract_response_subject. Frame-noun
+#             and forbidden-head filters inherited automatically
+#             (reconciliation port, internal notes.
+#   - Path 2: pronoun-led sentences anchor-bond to the article
+#             title. subject_origin="anchor" marks these for
+#             post-retrain audit. The sentence's predicate+tail
+#             still go through _relation_for_pred + final
+#             editorial/citation/code/interrogative guard.
+#   - Path 3: explicit junk-sentence filter (interrogative,
+#             code, citation marker, editorial frame, frame-noun
+#             fragment, quote-wrapped, too-short).
+#
+# Output: list of bond dicts matching smart_extractor's bond
+# dict shape, plus a `subject_origin` field. Callers can union
+# with smart_extractor output and dedup on
+# (subject.lower(), relation, object.lower()).
+#
+# Sentence segmenter: pysbd 0.3.4 (pure-Python, handles
+# abbreviations like "Dr.", "U.S.", "e.g."). Lazy-imported so
+# stub environments without pysbd can still import this module.
+# ============================================================
+
+_PYSBD_SEG = None
+def _get_segmenter():
+    global _PYSBD_SEG
+    if _PYSBD_SEG is None:
+        import pysbd
+        _PYSBD_SEG = pysbd.Segmenter(language="en", clean=False)
+    return _PYSBD_SEG
+
+
+_PORTB_PRONOUN_LEAD_RE = re.compile(
+    r"^\s*(?:it|this|that|these|those|he|she|they|we|you|i)\b",
+    re.IGNORECASE,
+)
+
+# Interrogative-shape leads. Mirrors stackexchange-loader's filter set.
+_PORTB_INTERROGATIVE_LEAD_RE = re.compile(
+    r"^\s*(?:how|what|why|when|where|who|whose|whom|which)\b",
+    re.IGNORECASE,
+)
+_PORTB_QUESTION_END_RE = re.compile(r"\?\s*$")
+
+# Code-shape tokens. Substring presence in the sentence is enough.
+_PORTB_CODE_TOKEN_RE = re.compile(
+    r"(?:\bdef\s+\w|\bfunction\s+\w|\bimport\s+\w|console\.log"
+    r"|\bclass\s+\w|\basync\s+def|=>"
+    r"|<\/?[a-z][\w-]*>|<[a-z][\w-]*\s+[^>]*>"
+    r"|#include\b|#define\b|\bnpm\s+install\b|\bpip\s+install\b"
+    r"|\bSELECT\s+\*\s+FROM\b|\bINSERT\s+INTO\b|\bUPDATE\s+\w+\s+SET\b)",
+    re.IGNORECASE,
+)
+
+# Bracketed numeric citation markers ([1], [12], [3,4], [5-7]).
+_PORTB_CITATION_MARKER_RE = re.compile(r"\[\d+(?:[,\s\-\d]*)\]")
+
+# Editorial-frame tokens. Mirrors BatchSink editorial-frame guard
+# from the loaders.
+_PORTB_EDITORIAL_FRAME_RE = re.compile(
+    r"\b(?:according to|as noted|see also|as mentioned|as discussed"
+    r"|as described|this paper|this article|this study|this report"
+    r"|this work|this thesis|this manuscript|the present paper"
+    r"|this section|this chapter|i argue|we argue|we propose"
+    r"|i propose|i claim|we claim|i suggest|we suggest)\b",
+    re.IGNORECASE,
+)
+
+# Sentence fully wrapped in matched single/double quotes.
+_PORTB_QUOTE_WRAPPED_RE = re.compile(r'^\s*["\'].+["\']\s*[.!?]?\s*$')
+
+# Whole-sentence frame-noun fragments. Sentence equals one of these
+# (case-insensitive, with or without trailing period). Drop.
+_PORTB_FRAME_FRAGMENT_SENTENCES = frozenset({
+    "references", "see also", "this paper", "this article",
+    "this study", "this work", "this report", "this section",
+    "external links", "further reading", "notes", "footnotes",
+    "bibliography", "introduction", "conclusion", "abstract",
+    "summary", "background", "methods", "method", "results",
+    "discussion", "acknowledgements", "acknowledgments",
+})
+
+_PORTB_MIN_SENTENCE_WORDS = 4
+
+
+def _portb_is_junk(sentence):
+    """Path 3 -- True if sentence emits no bond."""
+    if not sentence:
+        return True
+    s = sentence.strip()
+    if not s:
+        return True
+    # Length floor
+    if len(s.split()) < _PORTB_MIN_SENTENCE_WORDS:
+        return True
+    # Whole-sentence frame-noun fragment
+    if s.lower().rstrip(".!? \t") in _PORTB_FRAME_FRAGMENT_SENTENCES:
+        return True
+    # Interrogative
+    if _PORTB_QUESTION_END_RE.search(s):
+        return True
+    if _PORTB_INTERROGATIVE_LEAD_RE.match(s):
+        return True
+    # Code shape
+    if _PORTB_CODE_TOKEN_RE.search(s):
+        return True
+    # Citation marker
+    if _PORTB_CITATION_MARKER_RE.search(s):
+        return True
+    # Editorial frame
+    if _PORTB_EDITORIAL_FRAME_RE.search(s):
+        return True
+    # Quote-wrapped
+    if _PORTB_QUOTE_WRAPPED_RE.match(s):
+        return True
+    return False
+
+
+def _portb_starts_with_pronoun(sentence):
+    return bool(_PORTB_PRONOUN_LEAD_RE.match(sentence or ""))
+
+
+# Path 2 object-phrase extractor. After a leading pronoun, capture
+# (pred_verb, tail_object). Tail trimmed at the first subordinate-
+# clause connector so the object stays compact.
+_PORTB_PATH2_RE = re.compile(
+    r"^\s*(?:it|this|that|these|those|he|she|they|we|you|i)\s+"
+    + r"(?P<pred>" + _PRED_RE + r")\s+(?P<tail>[^.!?\n]{3,200})",
+    re.IGNORECASE,
+)
+_PORTB_TAIL_CLAUSE_SPLIT_RE = re.compile(
+    r"\s+(?:that|which|because|since|while|although|though)\s+",
+    re.IGNORECASE,
+)
+
+
+def _portb_path2_object(sentence):
+    """Extract (pred_verb, tail_object) from a pronoun-led sentence
+    or None if unparseable."""
+    if not sentence:
+        return None
+    m = _PORTB_PATH2_RE.match(sentence)
+    if not m:
+        return None
+    pred = (m.group("pred") or "").strip().lower()
+    tail = (m.group("tail") or "").strip()
+    tail = _PORTB_TAIL_CLAUSE_SPLIT_RE.split(tail, maxsplit=1)[0]
+    tail = tail.strip(",;:")
+    if len(tail) < 3 or len(tail) > 200:
+        return None
+    return (pred, tail)
+
+
+# Local kind lookup. Mirrors smart_extractor._RELATION_TO_KIND exactly.
+# Kept local so this curriculum-tier module does not import a
+# private-named symbol (`_kind_for`) from a peer module. If you add a
+# new relation, update BOTH this table AND
+# smart_extractor._RELATION_TO_KIND AND src/node.rs::
+# infer_kind_from_relation in lockstep.
+_PORTB_RELATION_TO_KIND = {
+    "IsA": "definition",
+    "PartOf": "composition",
+    "ComposedOf": "composition",
+    "UsedFor": "purpose",
+    "HasAspect": "fact",
+    "HasProperty": "fact",
+    "KnownFor": "fact",
+    "LocatedIn": "fact",
+    "FoundedBy": "fact",
+    "FoundedIn": "fact",
+    "DiscoveredBy": "fact",
+    "NamedAfter": "fact",
+    "WrittenBy": "fact",
+    "BornIn": "fact",
+    "DiedIn": "fact",
+    "BornOn": "fact",
+    "DiedOn": "fact",
+    "MeasuredIn": "fact",
+    "HasPopulation": "fact",
+    "HasAltitude": "fact",
+    "HasArea": "fact",
+    "HasOfficialLanguage": "fact",
+    "HasCapital": "fact",
+    "RelatedTo": "concept",
+}
+
+def _portb_kind_for(relation):
+    return _PORTB_RELATION_TO_KIND.get(relation, "concept")
+
+
+def _portb_tail_passes_asymmetry(tail):
+    """Final asymmetry-boundary check on the OBJECT phrase. Mirrors the
+    junk-filter set but applied to the tail only. Belt+suspenders so a
+    citation/editorial/code-shape token hiding mid-sentence doesn't
+    survive to the bond's object field."""
+    if not tail:
+        return False
+    if _PORTB_EDITORIAL_FRAME_RE.search(tail):
+        return False
+    if _PORTB_CITATION_MARKER_RE.search(tail):
+        return False
+    if _PORTB_CODE_TOKEN_RE.search(tail):
+        return False
+    if _PORTB_QUESTION_END_RE.search(tail):
+        return False
+    if _PORTB_INTERROGATIVE_LEAD_RE.match(tail):
+        return False
+    return True
+
+
+
+
+# Path 2 metalinguistic-object filter. Pronoun-led sentences whose
+# object phrase is one of these self-referential / discourse-meta
+# terms produce semantically nonsensical anchor-bonds (e.g.
+# "This is a question." => ("Article", IsA, "a question")). Filter
+# them at the path-2 emit site. Loose match: lowercase + strip
+# leading articles ("a ", "the ", "an ") then equality.
+_PORTB_PATH2_METALINGUISTIC = frozenset({
+    "question", "answer", "case", "issue", "problem",
+    "point", "topic", "subject", "fact", "statement",
+    "example", "thing", "matter", "claim", "argument",
+    "assumption", "premise", "conclusion", "remark",
+    "comment", "observation", "note", "hypothesis",
+    "true", "false", "correct", "incorrect", "wrong",
+    "right", "obvious", "clear", "important", "necessary",
+    "possible", "impossible", "likely", "unlikely",
+    "common", "rare", "good", "bad", "easy", "hard",
+    "simple", "complex", "complicated", "useful", "useless",
+})
+
+def _portb_path2_object_metalinguistic(tail):
+    """True if the tail object is a metalinguistic / discourse-meta
+    term that should not anchor-bond to the article title."""
+    if not tail:
+        return True
+    t = tail.lower().strip(" .,;:!?\t")
+    # Strip leading article so "a question" -> "question".
+    for art in ("a ", "an ", "the "):
+        if t.startswith(art):
+            t = t[len(art):]
+            break
+    if t in _PORTB_PATH2_METALINGUISTIC:
+        return True
+    return False
+
+
+
+# Path 2 anchor title-shape guard. Article titles that contain `?` or `!`,
+# or that start with a WH-question word, are interrogative in shape and
+# CANNOT be safely anchor-bonded. The pronoun-led sentence would inherit
+# the question shape as its bond subject -- gate (a) asymmetry leak.
+# Surfaced by arxiv 2307.06166 audit (2026-05-10): title "Can Vision-
+# Language Models be a Good Guesser? Exploring VLMs for Times and
+# Location Reasoning". Path 2 anchor with that title produces
+# (subject="Can Vision-Language Models be a Good Guesser? ...", IsA, ...)
+# which is an asymmetry violation.
+#
+# Fix: validate title shape BEFORE Path 2 dispatch. Disable Path 2 for
+# the entire document if title fails the shape check. Path 1 is
+# unaffected (no anchor dependency).
+_PORTB_TITLE_INTERROGATIVE_LEAD_RE = re.compile(
+    r"^\s*(?:how|what|why|when|where|who|whose|whom|which|"
+    r"does|do|did|is|are|was|were|can|could|should|would|will|"
+    r"may|might|must|shall|am)\b",
+    re.IGNORECASE,
+)
+
+def _portb_title_is_interrogative(title):
+    """True if the title cannot safely anchor a Path 2 bond."""
+    if not title:
+        return False  # empty title is handled separately (Path 2 already disabled)
+    t = title.strip()
+    if "?" in t:
+        return True
+    # Trailing "!" is rhetorical-frame; reject too.
+    if t.endswith("!"):
+        return True
+    if _PORTB_TITLE_INTERROGATIVE_LEAD_RE.match(t):
+        return True
+    return False
+
+
+def extract_response_bonds_multi_sentence(title, text, source_url):
+    """Port B (R1) -- multi-sentence Pattern A/B + anchor-bond extractor.
+
+    Returns list of bond dicts shaped like smart_extractor's output
+    plus a `subject_origin` field ("subject" for Path 1, "anchor" for
+    Path 2). Iterates every sentence in `text` via pysbd.
+
+    Asymmetry boundary is enforced TWICE per sentence: junk-filter on
+    the whole sentence (Path 3) before path dispatch, then a final
+    tail-only recheck before emit. This is intentional defence in
+    depth; an editorial frame hidden mid-sentence still gets caught.
+
+    Per-bond weight 0.4 / confidence "Inferred" -- matches the
+    original extract_response_bond. `layer` is "L-multi-sentence"
+    (Path 1) or "L-multi-anchor" (Path 2). Internal dedup is by
+    (subject.lower(), relation, object.lower()) tuple so the same
+    sentence cannot emit the same bond twice from this function.
+    Loader-level dedup against smart_extractor output is the
+    caller's responsibility (see arxiv/wikipedia/grokopedia/
+    stackexchange complementary-pass wirings).
+    """
+    if not text:
+        return []
+    title = (title or "").strip()
+    text_s = text.strip()
+    if len(text_s) < 20:
+        return []
+
+    try:
+        seg = _get_segmenter()
+        sentences = seg.segment(text_s)
+    except Exception:
+        # pysbd unavailable / threw -- fall back to homegrown regex so
+        # the codepath remains functional even on a stubbed env.
+        sentences = re.split(r"(?<=[.!?])\s+|\n+", text_s)
+
+    bonds = []
+    seen = set()
+
+    for raw in sentences:
+        s = (raw or "").strip()
+        if not s:
+            continue
+        if _portb_is_junk(s):
+            continue
+
+        # ---- Path 2: pronoun-led -> anchor-bond on title ----
+        if _portb_starts_with_pronoun(s):
+            if not title or _portb_title_is_interrogative(title):
+                # No safe anchor source (missing or interrogative-shape).
+                # Better no bond than wrong bond.
+                continue
+            parsed = _portb_path2_object(s)
+            if not parsed:
+                continue
+            pred, tail = parsed
+            if not _portb_tail_passes_asymmetry(tail):
+                continue
+            if _portb_path2_object_metalinguistic(tail):
+                continue
+            relation = _relation_for_pred(pred, tail)
+            # Phase-1 (2026-05-30): NP truncation replaces raw [:200].
+            obj = _truncate_to_np(tail)
+            if not obj:
+                continue
+            key = (title.lower(), relation, obj.lower())
+            if key in seen:
+                continue
+            seen.add(key)
+            bonds.append({
+                "subject": title,
+                "relation": relation,
+                "object": obj,
+                "kind": _portb_kind_for(relation),
+                "weight": 0.4,
+                "confidence": "Inferred",
+                "layer": "L-multi-anchor",
+                "source_url": source_url,
+                "subject_origin": "anchor",
+            })
+            continue
+
+        # ---- Path 1: clean Pattern A/B subject ----
+        parsed = _extract_response_subject(s)
+        if not parsed:
+            continue
+        subj, pred = parsed
+        # Re-locate the tail past the matched subject + predicate so
+        # _relation_for_pred can see phrase-anchored cues.
+        tail_m = re.search(
+            re.escape(subj) + r"\s+" + re.escape(pred) + r"\s+([^.!?\n]{3,200})",
+            s,
+            re.IGNORECASE,
+        )
+        if not tail_m:
+            continue
+        tail = tail_m.group(1).strip().strip(",;:")
+        if not _portb_tail_passes_asymmetry(tail):
+            continue
+        relation = _relation_for_pred(pred, tail)
+        # Phase-1 (2026-05-30): NP truncation replaces raw [:200].
+        obj = _truncate_to_np(tail)
+        if not obj:
+            continue
+        key = (subj.lower(), relation, obj.lower())
+        if key in seen:
+            continue
+        seen.add(key)
+        bonds.append({
+            "subject": subj,
+            "relation": relation,
+            "object": obj,
+            "kind": _portb_kind_for(relation),
+            "weight": 0.4,
+            "confidence": "Inferred",
+            "layer": "L-multi-sentence",
+            "source_url": source_url,
+            "subject_origin": "subject",
+        })
+
+    return bonds
+
+
+
+
+# ---- ingest funcs ----
+
+def _maybe_save(client, last_save_t, bonds_since_save, cp, corpus, last_id):
+    """Periodic save. Returns (last_save_t, bonds_since_save, saved_ok).
+
+    OP-SAVE-ASYNC — calls lu4d_save with mode="async" and then polls
+    lu4d_save_status every ~1.5s until state is "completed" or
+    "failed". saved_ok is True only when state == "completed".
+
+    Callers MUST advance their local last_saved_id only when saved_ok
+    is True, preserving the OP-012 cursor-discipline invariant.
+    """
+    now = time.monotonic()
+    if (now - last_save_t) >= SAVE_INTERVAL_SEC or bonds_since_save >= SAVE_INTERVAL_BONDS:
+        log_progress(f"{corpus}: lu4d_save async (interval) at last_id={last_id}")
+        ok = False
+        try:
+            r = client.call("lu4d_save", {"mode": "async"})
+            started = call_ok(r)
+        except Exception as e:
+            started = False
+            log_progress(f"{corpus}: lu4d_save (start) FAILED: {e}")
+        if started:
+            # Poll until terminal state.
+            # OP-SAVE-FINALIZE -- even if this poll cycle gives up, the next
+            # start_async_save will finalize the worker-completed save, so no
+            # data is lost. The deadline mainly protects the harness's own
+            # forward progress signal (checkpoint advancement). Bumped to 30 min
+            # to comfortably cover ~10 GB saves at observed ~22 MB/s CRC throughput.
+            poll_deadline = time.monotonic() + 1800.0  # 30 min hard cap
+            while True:
+                if time.monotonic() > poll_deadline:
+                    log_progress(f"{corpus}: lu4d_save_status poll deadline exceeded")
+                    break
+                try:
+                    sr = client.call("lu4d_save_status", {})
+                    sok = call_ok(sr)
+                except Exception as e:
+                    log_progress(f"{corpus}: lu4d_save_status FAILED: {e}")
+                    break
+                if not sok:
+                    break
+                state = None
+                try:
+                    sc = sr.get("result", {}).get("structuredContent", {})
+                    state = sc.get("state")
+                except Exception:
+                    state = None
+                if state == "completed":
+                    ok = True
+                    break
+                if state == "failed":
+                    err = sc.get("error") if isinstance(sc, dict) else None
+                    log_progress(f"{corpus}: lu4d_save FAILED state: {err}")
+                    break
+                # state is "running" or "idle" (idle would be unexpected — treat as not-yet-running);
+                # keep polling.
+                time.sleep(1.5)
+        if ok:
+            cp[corpus] = cp.get(corpus, {})
+            cp[corpus]["last_saved_id"] = last_id
+            save_checkpoint(cp)
+            log_progress(f"{corpus}: checkpoint updated last_saved_id={last_id}")
+        return time.monotonic(), 0, ok
+    return last_save_t, bonds_since_save, False
+
+
+def ingest_visual_genome(client, cp, smoke_limit=None):
+    import importlib.util, pathlib
+    loader_path = pathlib.Path(__file__).resolve().parent / "visual_genome_loader.py"
+    spec = importlib.util.spec_from_file_location("vg_loader", loader_path)
+    vg = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(vg)
+
+    # Aligns to TrustTable::seed_curriculum_corpora key (HF repo path).
+    # Without this stamp, VG bonds resolve to default_multiplier=0.4
+    # instead of the seeded 1.0 trust.
+    corpus_id = "ranjaykrishna/visual_genome"
+    target_total = smoke_limit if smoke_limit else 2_316_104  # canonical VG v1.4
+    log_progress(f"visual_genome: starting; target={target_total} smoke={bool(smoke_limit)}")
+
+    throttle = Throttle(THROTTLE_VG)
+    sink = BatchSink(client, throttle)
+    sink.bonds_landed   = cp.get(corpus_id, {}).get("bonds_landed", 0)
+    sink.bonds_errors   = cp.get(corpus_id, {}).get("errors_count", 0)
+    sink.bonds_skipped_dedup = cp.get(corpus_id, {}).get("bonds_skipped_dedup", 0)
+    last_saved_id = cp.get(corpus_id, {}).get("last_saved_id", -1)
+    images_seen = set()
+    skipped_reason = None
+    last_save_t = time.monotonic()
+    last_landed = sink.bonds_landed
+    pos = 0
+    bonds_landed = sink.bonds_landed
+    bonds_errors = sink.bonds_errors
+    try:
+        for s_name, raw_pred, o_name, image_id in vg.stream_triplets(max_triplets=target_total):
+            if pos <= last_saved_id:
+                pos += 1
+                continue
+            images_seen.add(image_id)
+            relation = vg.map_predicate(raw_pred)
+            url = f"vg-image-{image_id}"
+            try:
+                # CORPUS ATTRIBUTION call-site (Visual Genome, Tier 1).
+                # corpus_id == 'ranjaykrishna/visual_genome' from the top of
+                # ingest_visual_genome. See module-level CORPUS
+                # ATTRIBUTION block above BatchSink.
+                sink.add({
+                    "corpus": corpus_id, "source_url": url, "run_id": RUN_ID_TIER1,
+                    "subject": s_name, "relation": relation, "object": o_name,
+                    "weight": 0.5, "confidence": "Unverified",
+                })
+            except Exception:
+                sink.bonds_errors += 1
+            pos += 1
+            if pos % 500 == 0:
+                # Flush whatever is buffered so the progress log
+                # reflects bonds actually landed up to now.
+                sink.flush()
+                bonds_since_save = sink.bonds_landed - last_landed
+                log_progress(f"visual_genome: pos={pos}/{target_total} landed={sink.bonds_landed} "
+                             f"errors={sink.bonds_errors} images={len(images_seen)} "
+                             f"deduped={sink.bonds_skipped_dedup} gated={sink.bonds_gated}")
+                cp[corpus_id] = {"bonds_landed":sink.bonds_landed,"errors_count":sink.bonds_errors,
+                                 "bonds_skipped_dedup":sink.bonds_skipped_dedup,
+                                 "last_saved_id":last_saved_id}
+                save_checkpoint(cp)
+                new_t, new_b, saved_ok = _maybe_save(client, last_save_t, bonds_since_save, cp, corpus_id, pos-1)
+                if saved_ok:
+                    last_saved_id = pos - 1
+                    last_landed = sink.bonds_landed
+                last_save_t = new_t
+        # Flush any tail entries.
+        sink.flush()
+        bonds_landed = sink.bonds_landed
+        bonds_errors = sink.bonds_errors
+    except FileNotFoundError as e:
+        skipped_reason = f"cache missing: {e}"
+        log_progress(f"visual_genome: SKIPPED — {skipped_reason}")
+    except Exception as e:
+        skipped_reason = f"VG stream failed: {type(e).__name__}: {str(e)[:200]}"
+        log_progress(f"visual_genome: SKIPPED — {skipped_reason}")
+
+    # final save for corpus (only if we actually landed bonds)
+    if bonds_landed > 0:
+        try:
+            r = client.call("lu4d_save", {"mode": "async"})
+            if call_ok(r):
+                cp[corpus_id] = {"bonds_landed":bonds_landed,"errors_count":bonds_errors,
+                                 "last_saved_id":pos-1, "completed": True,
+                                 "skipped_reason": skipped_reason}
+                save_checkpoint(cp)
+        except Exception:
+            pass
+    else:
+        # No new bonds landed (SKIPPED or empty). Just mark completed in checkpoint.
+        cp[corpus_id] = {"bonds_landed":bonds_landed,"errors_count":bonds_errors,
+                         "last_saved_id":pos-1, "completed": True,
+                         "skipped_reason": skipped_reason}
+        save_checkpoint(cp)
+    log_progress(f"visual_genome: DONE landed={bonds_landed} errors={bonds_errors} "
+                 f"deduped={sink.bonds_skipped_dedup} gated={sink.bonds_gated} "
+                 f"images={len(images_seen)} skip={skipped_reason}")
+    return {"bonds_landed":bonds_landed,"bonds_errors":bonds_errors,
+            "bonds_skipped_dedup":sink.bonds_skipped_dedup,
+            "bonds_gated":sink.bonds_gated,
+            "images_processed":len(images_seen),"skipped_reason":skipped_reason}
+
+
+def ingest_wikipedia(client, cp, smoke_limit=None):
+    from datasets import load_dataset
+    corpus_id = "wikimedia/wikipedia"
+    target_total = smoke_limit if smoke_limit else 6_700_000
+    log_progress(f"wikipedia: starting load_dataset(streaming) target={target_total} smoke={bool(smoke_limit)}")
+    ds = load_dataset("wikimedia/wikipedia", "20231101.en", split="train", streaming=True)
+
+    throttle = Throttle(THROTTLE_WIKIPEDIA)
+    sink = BatchSink(client, throttle)
+    sink.bonds_landed   = cp.get(corpus_id, {}).get("bonds_landed", 0)
+    sink.bonds_errors   = cp.get(corpus_id, {}).get("errors_count", 0)
+    sink.bonds_skipped_dedup = cp.get(corpus_id, {}).get("bonds_skipped_dedup", 0)
+    last_saved_id = cp.get(corpus_id, {}).get("last_saved_id", -1)
+    last_save_t = time.monotonic()
+    last_landed = sink.bonds_landed
+    articles = 0
+    start_t = time.monotonic()
+    for ex in ds:
+        if articles >= target_total: break
+        if articles <= last_saved_id:
+            articles += 1
+            continue
+        title = ex.get("title",""); text = ex.get("text",""); url = ex.get("url","")
+        # Phase B: smart extractor v2 (iter-4). Returns list of dicts shaped
+        # for sink.add; extra fields like "layer"/"frequency" are ignored
+        # by sink.add. K-gate (T.3) inside lu4d_teach_corpus_batch is the
+        # quality filter.
+        bonds = extract_bonds_from_wikipedia_article(ex)
+        # Port B (R1) complementary pass: pronoun-anchored bonds that
+        # smart_extractor's title-alias filter would drop, and any
+        # multi-sentence Pattern A/B bonds outside the L3/L5
+        # title-anchored sentence set. Union + dedup against
+        # smart_extractor output on (subject.lower(), relation,
+        # object.lower()) so smart_extractor wins on shared triples.
+        extra_bonds = extract_response_bonds_multi_sentence(title, text, url)
+        if extra_bonds:
+            seen_triples = set(
+                (b["subject"].lower(), b["relation"], b["object"].lower())
+                for b in bonds
+            )
+            for eb in extra_bonds:
+                key = (eb["subject"].lower(), eb["relation"], eb["object"].lower())
+                if key in seen_triples:
+                    continue
+                seen_triples.add(key)
+                bonds.append(eb)
+        for b in bonds:
+            try:
+                # CORPUS ATTRIBUTION call-site (Wikipedia, Tier 1).
+                # corpus_id == 'wikimedia/wikipedia' from the top of
+                # ingest_wikipedia. See module-level CORPUS
+                # ATTRIBUTION block above BatchSink.
+                sink.add({
+                    "corpus": corpus_id,
+                    "source_url": b.get("source_url") or url,
+                    "run_id": RUN_ID_TIER1,
+                    "subject": b["subject"],
+                    "relation": b["relation"],
+                    "object": b["object"],
+                    "weight": b["weight"],
+                    "confidence": b["confidence"],
+                })
+            except Exception:
+                sink.bonds_errors += 1
+        articles += 1
+        if articles % 1000 == 0:
+            sink.flush()
+            bonds_since_save = sink.bonds_landed - last_landed
+            elapsed = time.monotonic() - start_t
+            rate = articles / elapsed if elapsed > 0 else 0
+            eta = (target_total - articles) / rate if rate > 0 else float("inf")
+            log_progress(f"wikipedia: articles={articles}/{target_total} "
+                         f"bonds_landed={sink.bonds_landed} errors={sink.bonds_errors} "
+                         f"deduped={sink.bonds_skipped_dedup} gated={sink.bonds_gated} "
+                         f"rate={rate:.1f}art/s eta_remaining_s={eta:.0f}")
+            cp[corpus_id] = {"bonds_landed":sink.bonds_landed,"errors_count":sink.bonds_errors,
+                             "bonds_skipped_dedup":sink.bonds_skipped_dedup,
+                             "last_saved_id":last_saved_id}
+            save_checkpoint(cp)
+            new_t, new_b, saved_ok = _maybe_save(client, last_save_t, bonds_since_save, cp, corpus_id, articles-1)
+            if saved_ok:
+                last_saved_id = articles - 1
+                last_landed = sink.bonds_landed
+            last_save_t = new_t
+    sink.flush()
+    bonds_landed = sink.bonds_landed
+    bonds_errors = sink.bonds_errors
+    # final save
+    try:
+        r = client.call("lu4d_save", {})
+        if call_ok(r):
+            cp[corpus_id] = {"bonds_landed":bonds_landed,"errors_count":bonds_errors,
+                             "last_saved_id":articles-1, "completed": True}
+            save_checkpoint(cp)
+    except Exception:
+        pass
+    log_progress(f"wikipedia: DONE articles={articles} landed={bonds_landed} errors={bonds_errors}")
+    return {"articles_processed":articles,"bonds_landed":bonds_landed,"bonds_errors":bonds_errors}
+
+
+def _safe_glob(pattern):
+    import glob
+    return sorted(glob.glob(pattern))
+
+
+def ingest_arxiv(client, cp, smoke_limit=None,
+                 set_spec="cs:cs:AI", frm="2024-01-01", until="2024-06-30",
+                 max_papers=None):
+    """Tier-1 arxiv abstracts via OAI-PMH internal notes.
+
+    Shape Y wiring: importlib-loads scripts/arxiv_loader.py, drives its
+    pure stream_papers + make_bonds helpers through the shared
+    BatchSink/McpClient. Sidecar (~/.lu/arxiv_progress.jsonl) is reused
+    for cross-run resume; cp[corpus_id] tracks within-run progress.
+    """
+    import importlib.util, pathlib
+    loader_path = pathlib.Path(__file__).resolve().parent / "arxiv_loader.py"
+    spec = importlib.util.spec_from_file_location("arxiv_loader_mod", loader_path)
+    arx = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(arx)
+
+    corpus_id = arx.CORPUS_ID  # "arxiv"
+    sidecar = arx.DEFAULT_SIDECAR
+    arx._ensure_sidecar(sidecar)
+    seen_ids = arx.load_seen_ids(sidecar)
+    target = smoke_limit if smoke_limit else (max_papers if max_papers else 5000)
+
+    log_progress(
+        f"arxiv: starting; set={set_spec} from={frm} until={until} "
+        f"target={target} sidecar_seen={len(seen_ids)} "
+        f"smoke={bool(smoke_limit)}"
+    )
+
+    sink = BatchSink(client, Throttle(THROTTLE_TIER2))
+    sink.bonds_landed = cp.get(corpus_id, {}).get("bonds_landed", 0)
+    sink.bonds_errors = cp.get(corpus_id, {}).get("errors_count", 0)
+    sink.bonds_skipped_dedup = cp.get(corpus_id, {}).get("bonds_skipped_dedup", 0)
+    last_landed = sink.bonds_landed
+    last_save_t = time.monotonic()
+
+    papers_seen = 0
+    papers_already_seen = 0
+    papers_no_bond = 0
+    papers_leak_filtered_all = 0
+    last_aid = None
+    skipped_reason = None
+
+    try:
+        for paper in arx.stream_papers(set_spec, frm, until, target):
+            papers_seen += 1
+            aid = paper.get("arxiv_id") or ""
+            last_aid = aid
+            if aid in seen_ids:
+                papers_already_seen += 1
+                continue
+            bonds = arx.make_bonds(paper)
+            if not bonds:
+                arx.append_seen(sidecar, aid, "no_bond", 0)
+                papers_no_bond += 1
+                continue
+            paper_queued = 0
+            paper_leak_filtered = 0
+            for b in bonds:
+                subj = b.get("subject", "") or ""
+                if arx.subject_leaks(subj):
+                    paper_leak_filtered += 1
+                    continue
+                # CORPUS ATTRIBUTION call-site (arxiv, Tier 1).
+                # corpus_id == "arxiv" matches TrustTable seed.
+                ok = sink.add({
+                    "corpus": corpus_id,
+                    "source_url": b.get("source_url") or f"https://arxiv.org/abs/{aid}",
+                    "run_id": RUN_ID_TIER1,
+                    "subject": subj,
+                    "relation": b["relation"],
+                    "object": b["object"],
+                    "weight": b.get("weight", 0.5),
+                    "confidence": b.get("confidence", "Unverified"),
+                })
+                if ok:
+                    paper_queued += 1
+            papers_leak_filtered_all += paper_leak_filtered
+            if paper_queued > 0:
+                arx.append_seen(sidecar, aid, f"queued:{paper_queued}", paper_queued)
+            else:
+                arx.append_seen(sidecar, aid,
+                                f"all_filtered:{paper_leak_filtered}", 0)
+            if papers_seen % 50 == 0:
+                sink.flush()
+                bonds_since_save = sink.bonds_landed - last_landed
+                log_progress(
+                    f"arxiv: papers={papers_seen}/{target} "
+                    f"landed={sink.bonds_landed} no_bond={papers_no_bond} "
+                    f"leak={papers_leak_filtered_all} already={papers_already_seen}"
+                )
+                cp[corpus_id] = {
+                    "bonds_landed": sink.bonds_landed,
+                    "errors_count": sink.bonds_errors,
+                    "bonds_skipped_dedup": sink.bonds_skipped_dedup,
+                    "last_arxiv_id": aid,
+                }
+                save_checkpoint(cp)
+                new_t, _b_disc, saved_ok = _maybe_save(client, last_save_t, bonds_since_save,
+                                       cp, corpus_id, aid)
+                if saved_ok:
+                    last_landed = sink.bonds_landed
+                last_save_t = new_t
+        sink.flush()
+    except Exception as e:
+        skipped_reason = f"arxiv stream failed: {type(e).__name__}: {str(e)[:200]}"
+        log_progress(f"arxiv: SKIPPED \u2014 {skipped_reason}")
+
+    try:
+        r = client.call("lu4d_save", {})
+        if call_ok(r):
+            cp[corpus_id] = {
+                "bonds_landed": sink.bonds_landed,
+                "errors_count": sink.bonds_errors,
+                "bonds_skipped_dedup": sink.bonds_skipped_dedup,
+                "last_arxiv_id": last_aid,
+                "completed": True,
+                "skipped_reason": skipped_reason,
+            }
+            save_checkpoint(cp)
+    except Exception:
+        pass
+    log_progress(
+        f"arxiv: DONE landed={sink.bonds_landed} errors={sink.bonds_errors} "
+        f"papers={papers_seen} no_bond={papers_no_bond} "
+        f"leak={papers_leak_filtered_all} already={papers_already_seen} "
+        f"skip={skipped_reason}"
+    )
+    return {
+        "bonds_landed": sink.bonds_landed,
+        "bonds_errors": sink.bonds_errors,
+        "bonds_skipped_dedup": sink.bonds_skipped_dedup,
+        "papers_seen": papers_seen,
+        "papers_no_bond": papers_no_bond,
+        "papers_leak_filtered": papers_leak_filtered_all,
+        "papers_already_seen": papers_already_seen,
+        "skipped_reason": skipped_reason,
+    }
+
+
+def ingest_stackexchange(client, cp, smoke_limit=None,
+                         xml_paths=None, min_score=5):
+    """Tier-1 StackExchange answers via offline XML dumps internal notes.
+
+    Shape Y wiring. xml_paths defaults to glob('/tmp/se/*/Posts.xml').
+    If none present, logs a SKIPPED status (not a hard error: the corpus
+    is opportunistic, not required).
+    """
+    import importlib.util, pathlib
+    loader_path = pathlib.Path(__file__).resolve().parent / "stackexchange_loader.py"
+    spec = importlib.util.spec_from_file_location("se_loader_mod", loader_path)
+    se = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(se)
+
+    corpus_id = "stackexchange"  # matches TrustTable seed key
+    if not xml_paths:
+        xml_paths = _safe_glob("/tmp/se/*/Posts.xml")
+    if not xml_paths:
+        log_progress(
+            "stackexchange: SKIPPED \u2014 no Posts.xml under /tmp/se/. "
+            "Drop a StackExchange data dump and re-run."
+        )
+        return {
+            "bonds_landed": 0,
+            "bonds_errors": 0,
+            "answers_seen": 0,
+            "skipped_reason": "no_xml_dumps_present",
+        }
+
+    log_progress(
+        f"stackexchange: starting; xml_paths={xml_paths} "
+        f"min_score={min_score} smoke={bool(smoke_limit)}"
+    )
+
+    sink = BatchSink(client, Throttle(THROTTLE_TIER2))
+    sink.bonds_landed = cp.get(corpus_id, {}).get("bonds_landed", 0)
+    sink.bonds_errors = cp.get(corpus_id, {}).get("errors_count", 0)
+    sink.bonds_skipped_dedup = cp.get(corpus_id, {}).get("bonds_skipped_dedup", 0)
+    last_landed = sink.bonds_landed
+    last_save_t = time.monotonic()
+
+    answers_seen = 0
+    answers_no_anchor = 0
+    answers_q_only = 0
+    skipped_reason = None
+    last_post_id = None
+
+    seen_post_ids_this_run = set()
+    target = smoke_limit
+
+    for xml_path in xml_paths:
+        site = pathlib.Path(xml_path).parent.name or "stackexchange.com"
+        try:
+            for ans in se.stream_answers(
+                xml_path, min_score=min_score, max_answers=target
+            ):
+                answers_seen += 1
+                last_post_id = ans.get("id")
+                if last_post_id in seen_post_ids_this_run:
+                    continue
+                seen_post_ids_this_run.add(last_post_id)
+                try:
+                    bonds, diag = se.extract_bonds_for_answer(ans, site)
+                except Exception as e:
+                    sink.bonds_errors += 1
+                    diag = {"skipped_reason": f"extractor:{type(e).__name__}"}
+                    bonds = []
+                reason = diag.get("skipped_reason")
+                if reason == "no_anchor":
+                    answers_no_anchor += 1
+                elif reason == "all_sentences_question_framed":
+                    answers_q_only += 1
+                for b in bonds:
+                    # CORPUS ATTRIBUTION call-site (stackexchange, Tier 1).
+                    sink.add({
+                        "corpus": corpus_id,
+                        "source_url": f"https://{site}/a/{ans['id']}",
+                        "run_id": RUN_ID_TIER1,
+                        "subject": b["subject"],
+                        "relation": b["relation"],
+                        "object": b["object"],
+                        "weight": b.get("weight", 0.5),
+                        "confidence": b.get("confidence", "Unverified"),
+                    })
+                if answers_seen % 100 == 0:
+                    sink.flush()
+                    bonds_since_save = sink.bonds_landed - last_landed
+                    log_progress(
+                        f"stackexchange: site={site} answers={answers_seen} "
+                        f"landed={sink.bonds_landed} no_anchor={answers_no_anchor} "
+                        f"q_only={answers_q_only}"
+                    )
+                    cp[corpus_id] = {
+                        "bonds_landed": sink.bonds_landed,
+                        "errors_count": sink.bonds_errors,
+                        "bonds_skipped_dedup": sink.bonds_skipped_dedup,
+                        "last_xml": xml_path,
+                        "last_post_id": last_post_id,
+                    }
+                    save_checkpoint(cp)
+                    new_t, _b_disc, saved_ok = _maybe_save(
+                        client, last_save_t, bonds_since_save,
+                        cp, corpus_id, last_post_id,
+                    )
+                    if saved_ok:
+                        last_landed = sink.bonds_landed
+                    last_save_t = new_t
+                if smoke_limit and answers_seen >= smoke_limit:
+                    break
+        except Exception as e:
+            skipped_reason = (
+                f"se stream failed for {xml_path}: "
+                f"{type(e).__name__}: {str(e)[:200]}"
+            )
+            log_progress(f"stackexchange: WARN \u2014 {skipped_reason}")
+        if smoke_limit and answers_seen >= smoke_limit:
+            break
+
+    sink.flush()
+    try:
+        r = client.call("lu4d_save", {})
+        if call_ok(r):
+            cp[corpus_id] = {
+                "bonds_landed": sink.bonds_landed,
+                "errors_count": sink.bonds_errors,
+                "bonds_skipped_dedup": sink.bonds_skipped_dedup,
+                "last_post_id": last_post_id,
+                "completed": True,
+                "skipped_reason": skipped_reason,
+            }
+            save_checkpoint(cp)
+    except Exception:
+        pass
+    log_progress(
+        f"stackexchange: DONE landed={sink.bonds_landed} "
+        f"errors={sink.bonds_errors} answers={answers_seen} "
+        f"no_anchor={answers_no_anchor} q_only={answers_q_only} "
+        f"skip={skipped_reason}"
+    )
+    return {
+        "bonds_landed": sink.bonds_landed,
+        "bonds_errors": sink.bonds_errors,
+        "bonds_skipped_dedup": sink.bonds_skipped_dedup,
+        "answers_seen": answers_seen,
+        "answers_no_anchor": answers_no_anchor,
+        "answers_q_only": answers_q_only,
+        "skipped_reason": skipped_reason,
+    }
+
+
+def ingest_grokopedia(client, cp, smoke_limit=None,
+                      seeds=None, sitemap_index_url=None):
+    """Tier-1 Grokipedia articles via sitemap walk or explicit seeds.
+
+    Shape Y wiring. In smoke mode, uses DEFAULT_SEEDS from the loader
+    (diverse-topic seed list) capped at smoke_limit so we don't fetch
+    the entire sitemap during dry-runs. In production, walks the sitemap.
+    """
+    import importlib.util, pathlib
+    loader_path = (
+        pathlib.Path(__file__).resolve().parent / "grokopedia_loader.py"
+    )
+    spec = importlib.util.spec_from_file_location("grok_loader_mod", loader_path)
+    grk = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(grk)
+
+    corpus_id = grk.CORPUS_ID  # "grokipedia"
+    progress_path = grk.DEFAULT_PROGRESS_PATH
+
+    # Smoke mode: prefer the loader's diverse-topic seed list (cached/local)
+    # over a live sitemap walk so smoke runs don't depend on the network.
+    if smoke_limit and not seeds:
+        seeds = list(grk.DEFAULT_SEEDS)[: max(1, int(smoke_limit) * 2)]
+
+    log_progress(
+        f"grokopedia: starting; "
+        f"mode={'seeds' if seeds else 'sitemap'} "
+        f"seeds_count={len(seeds) if seeds else 0} "
+        f"target={smoke_limit or 'unbounded'} smoke={bool(smoke_limit)}"
+    )
+
+    sink = BatchSink(client, Throttle(THROTTLE_TIER2))
+    sink.bonds_landed = cp.get(corpus_id, {}).get("bonds_landed", 0)
+    sink.bonds_errors = cp.get(corpus_id, {}).get("errors_count", 0)
+    sink.bonds_skipped_dedup = cp.get(corpus_id, {}).get("bonds_skipped_dedup", 0)
+    last_landed = sink.bonds_landed
+    last_save_t = time.monotonic()
+
+    articles_seen = 0
+    articles_no_bond = 0
+    skipped_reason = None
+    last_url = None
+
+    sitemap_arg = sitemap_index_url or grk.SITEMAP_INDEX_URL
+    try:
+        for article in grk.stream_articles(
+            seeds=seeds,
+            sitemap_index_url=sitemap_arg,
+            limit=smoke_limit,
+            progress_path=progress_path,
+        ):
+            articles_seen += 1
+            last_url = article.get("url")
+            try:
+                bonds = grk.extract_bonds(article)
+            except Exception:
+                bonds = []
+                sink.bonds_errors += 1
+            if not bonds:
+                articles_no_bond += 1
+            for b in bonds:
+                # CORPUS ATTRIBUTION call-site (grokipedia, Tier 1).
+                sink.add({
+                    "corpus": corpus_id,
+                    "source_url": last_url or "",
+                    "run_id": RUN_ID_TIER1,
+                    "subject": b["subject"],
+                    "relation": b["relation"],
+                    "object": b["object"],
+                    "weight": b.get("weight", 0.5),
+                    "confidence": b.get("confidence", "Unverified"),
+                })
+            # Persist resume record so the loader's own resume gate catches
+            # this URL on a future invocation.
+            try:
+                grk._append_resume(progress_path, {
+                    "url": last_url, "queued": len(bonds),
+                })
+            except Exception:
+                pass
+            if articles_seen % 25 == 0:
+                sink.flush()
+                bonds_since_save = sink.bonds_landed - last_landed
+                log_progress(
+                    f"grokopedia: articles={articles_seen}/{smoke_limit or '?'} "
+                    f"landed={sink.bonds_landed} no_bond={articles_no_bond}"
+                )
+                cp[corpus_id] = {
+                    "bonds_landed": sink.bonds_landed,
+                    "errors_count": sink.bonds_errors,
+                    "bonds_skipped_dedup": sink.bonds_skipped_dedup,
+                    "last_url": last_url,
+                }
+                save_checkpoint(cp)
+                new_t, _b_disc, saved_ok = _maybe_save(
+                    client, last_save_t, bonds_since_save,
+                    cp, corpus_id, articles_seen,
+                )
+                if saved_ok:
+                    last_landed = sink.bonds_landed
+                last_save_t = new_t
+        sink.flush()
+    except Exception as e:
+        skipped_reason = (
+            f"grokopedia stream failed: {type(e).__name__}: {str(e)[:200]}"
+        )
+        log_progress(f"grokopedia: WARN \u2014 {skipped_reason}")
+
+    try:
+        r = client.call("lu4d_save", {})
+        if call_ok(r):
+            cp[corpus_id] = {
+                "bonds_landed": sink.bonds_landed,
+                "errors_count": sink.bonds_errors,
+                "bonds_skipped_dedup": sink.bonds_skipped_dedup,
+                "last_url": last_url,
+                "completed": True,
+                "skipped_reason": skipped_reason,
+            }
+            save_checkpoint(cp)
+    except Exception:
+        pass
+    log_progress(
+        f"grokopedia: DONE landed={sink.bonds_landed} "
+        f"errors={sink.bonds_errors} articles={articles_seen} "
+        f"no_bond={articles_no_bond} skip={skipped_reason}"
+    )
+    return {
+        "bonds_landed": sink.bonds_landed,
+        "bonds_errors": sink.bonds_errors,
+        "bonds_skipped_dedup": sink.bonds_skipped_dedup,
+        "articles_seen": articles_seen,
+        "articles_no_bond": articles_no_bond,
+        "skipped_reason": skipped_reason,
+    }
+
+
+
+
+def _ingest_tier2(client, cp, name, dataset_repo, dataset_split,
+                  prompt_field, response_field, total_estimate, smoke_limit=None):
+    from datasets import load_dataset
+    corpus_id = dataset_repo
+    target_total = smoke_limit if smoke_limit else total_estimate
+    log_progress(f"{name}: starting load_dataset(streaming) target={target_total} smoke={bool(smoke_limit)}")
+
+    throttle = Throttle(THROTTLE_TIER2)
+    sink = BatchSink(client, throttle)
+    sink.bonds_landed   = cp.get(corpus_id, {}).get("bonds_landed", 0)
+    sink.bonds_errors   = cp.get(corpus_id, {}).get("errors_count", 0)
+    sink.bonds_skipped_dedup = cp.get(corpus_id, {}).get("bonds_skipped_dedup", 0)
+    statements_landed = cp.get(corpus_id, {}).get("statements_landed", 0)
+    last_saved_id = cp.get(corpus_id, {}).get("last_saved_id", -1)
+    last_save_t = time.monotonic(); last_landed = sink.bonds_landed
+    examples = 0
+    skipped_reason = None
+    # BR.9 line-698 fix: pre-init names referenced in the post-try cleanup
+    # path so an immediate load_dataset() failure does not raise
+    # UnboundLocalError on bonds_landed / bonds_errors.
+    bonds_landed = sink.bonds_landed
+    bonds_errors = sink.bonds_errors
+    try:
+        ds = load_dataset(dataset_repo, split=dataset_split, streaming=True)
+        for ex in ds:
+            if examples >= target_total: break
+            if examples <= last_saved_id:
+                examples += 1; continue
+            # Fetch prompt + response — heuristics handle no_robots vs instruction-dataset
+            if prompt_field == "messages":
+                msgs = ex.get("messages", []) or []
+                prompt, response = "", ""
+                for m in msgs:
+                    if m.get("role") == "user" and not prompt: prompt = m.get("content","")
+                    elif m.get("role") == "assistant" and not response: response = m.get("content","")
+            else:
+                prompt = ex.get(prompt_field,"") or ex.get("instruction","")
+                response = ex.get(response_field,"") or ex.get("response","") or ex.get("output","")
+            if prompt:
+                throttle.wait()
+                try:
+                    r = client.call("lu4d_user_statement",
+                        {"text": prompt[:1000], "source_label": corpus_id})
+                    if call_ok(r): statements_landed += 1
+                except Exception:
+                    pass
+            bond = extract_response_bond(prompt, response)
+            if bond:
+                s,rel,o,w,c = bond
+                try:
+                    # CORPUS ATTRIBUTION call-site (Tier 2 instruction
+                    # datasets). corpus_id is the dataset_repo passed
+                    # in by the caller (e.g. 'HuggingFaceH4/no_robots').
+                    # See module-level CORPUS ATTRIBUTION block above
+                    # BatchSink.
+                    sink.add({
+                        "corpus":corpus_id, "run_id":RUN_ID_TIER2,
+                        "subject":s, "relation":rel, "object":o,
+                        "weight":w, "confidence":c,
+                    })
+                except Exception:
+                    sink.bonds_errors += 1
+            examples += 1
+            if examples % 200 == 0:
+                sink.flush()
+                bonds_since_save = sink.bonds_landed - last_landed
+                log_progress(f"{name}: examples={examples}/{target_total} "
+                             f"statements={statements_landed} bonds_landed={sink.bonds_landed} "
+                             f"errors={sink.bonds_errors} deduped={sink.bonds_skipped_dedup} "
+                             f"gated={sink.bonds_gated}")
+                cp[corpus_id] = {"bonds_landed":sink.bonds_landed,"errors_count":sink.bonds_errors,
+                                 "bonds_skipped_dedup":sink.bonds_skipped_dedup,
+                                 "statements_landed":statements_landed,
+                                 "last_saved_id":last_saved_id}
+                save_checkpoint(cp)
+                new_t, new_b, saved_ok = _maybe_save(client, last_save_t, bonds_since_save, cp, corpus_id, examples-1)
+                if saved_ok:
+                    last_saved_id = examples - 1
+                    last_landed = sink.bonds_landed
+                last_save_t = new_t
+        sink.flush()
+        bonds_landed = sink.bonds_landed
+        bonds_errors = sink.bonds_errors
+    except Exception as e:
+        skipped_reason = f"{name} load failed: {type(e).__name__}: {str(e)[:200]}"
+        log_progress(f"{name}: SKIPPED — {skipped_reason}")
+    try:
+        r = client.call("lu4d_save", {})
+        if call_ok(r):
+            cp[corpus_id] = {"bonds_landed":bonds_landed,"errors_count":bonds_errors,
+                             "statements_landed":statements_landed,
+                             "last_saved_id":examples-1, "completed": True,
+                             "skipped_reason": skipped_reason}
+            save_checkpoint(cp)
+    except Exception:
+        pass
+    log_progress(f"{name}: DONE examples={examples} statements={statements_landed} "
+                 f"landed={bonds_landed} errors={bonds_errors} skip={skipped_reason}")
+    return {"examples_processed":examples,"statements_landed":statements_landed,
+            "bonds_landed":bonds_landed,"bonds_errors":bonds_errors,
+            "skipped_reason":skipped_reason}
+
+def ingest_no_robots(client, cp, smoke_limit=None):
+    return _ingest_tier2(client, cp, "no_robots", "HuggingFaceH4/no_robots",
+                          "train", "messages", "messages", 10000, smoke_limit)
+
+def ingest_instruction_dataset(client, cp, smoke_limit=None):
+    return _ingest_tier2(client, cp, "instruction-dataset",
+                          "HuggingFaceH4/instruction-dataset", "test",
+                          "prompt", "completion", 330, smoke_limit)
+
+
+# ---- main ----
+
+def main():
+    global PROGRESS_LOG, CHECKPOINT, DONE_SENTINEL
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--brain", default="/var/lib/lu/brain-v5-20260611-enc")
+    parser.add_argument("--keyfile", default="/var/lib/lu/master.key")
+    parser.add_argument("--mcp-stderr", default="/var/lib/lu/ingest_full_mcp.err")
+    parser.add_argument("--smoke", type=int, default=None,
+                        help="Smoke mode: cap each corpus to this many examples")
+    parser.add_argument("--tier", action="append", type=int, choices=[1,2], default=None,
+                        help="Restrict to listed tier(s); default both")
+    parser.add_argument("--summary-out", default="/var/lib/lu/ingest_full_summary.json")
+    parser.add_argument("--pipe", default=None,
+                        help="Accepted-and-ignored for spec compatibility (subprocess.Popen used)")
+    parser.add_argument("--checkpoint", default=CHECKPOINT,
+                        help="Override default checkpoint path")
+    parser.add_argument("--progress-log", default=PROGRESS_LOG,
+                        help="Override default progress-log path")
+    parser.add_argument("--arxiv-set", default="cs:cs:AI",
+                        help="arxiv OAI-PMH setSpec (default cs:cs:AI)")
+    parser.add_argument("--arxiv-from", default="2024-01-01",
+                        help="arxiv OAI-PMH from date (default 2024-01-01)")
+    parser.add_argument("--arxiv-until", default="2024-06-30",
+                        help="arxiv OAI-PMH until date (default 2024-06-30)")
+    parser.add_argument("--arxiv-max-papers", type=int, default=5000,
+                        help="arxiv max papers (default 5000; smoke overrides)")
+    parser.add_argument("--se-xml-paths", action="append", default=None,
+                        help="StackExchange Posts.xml path(s). Repeatable. Defaults to glob /tmp/se/*/Posts.xml.")
+    parser.add_argument("--se-min-score", type=int, default=5,
+                        help="StackExchange answer min score (default 5)")
+    parser.add_argument("--grok-seeds", action="append", default=None,
+                        help="Grokipedia explicit seed slugs. Repeatable. Smoke mode auto-fills from loader DEFAULT_SEEDS if empty.")
+    parser.add_argument("--grok-sitemap", default=None,
+                        help="Override Grokipedia sitemap index URL.")
+    parser.add_argument("--seed-trust", action="store_true", default=False,
+                        help="BR.10b: before ingest, invoke "
+                             "lu4d_trust_reset_to_defaults with "
+                             "seed_curriculum_corpora=true so corpus_multipliers "
+                             "is non-empty (matches TrustTable seed keys: "
+                             "wikimedia/wikipedia=1.0, ranjaykrishna/visual_genome=1.0, "
+                             "GQA=0.9, arxiv=0.9, etc.). Without this flag, every "
+                             "corpus resolves to default_multiplier=0.4 — only the "
+                             "3 C2-aligned domain entries (grokipedia/wikipedia/duckduckgo) "
+                             "are seeded by TrustTable::default(). Required for the "
+                             "BR.10b retrain bar.")
+    args = parser.parse_args()
+
+    # Smoke-vs-production checkpoint isolation (Cat.1-retrain post-mortem):
+    # When --smoke is set, automatically route checkpoint and progress-log
+    # to *_smoke siblings so smoke verification cannot pollute the production
+    # state. The 2026-05-04 retrain shipped with smoke + full sharing the
+    # default checkpoint, leaving stale {last_saved_id: 49, completed: true}
+    # markers from Phase 2 visible to Phase 3.
+    smoke_redirect_msg = None
+    if args.smoke is not None:
+        def _smoke_path(p):
+            base, dot, ext = p.rpartition(".")
+            return f"{base}_smoke.{ext}" if dot else f"{p}_smoke"
+        orig_cp = args.checkpoint
+        orig_pl = args.progress_log
+        orig_su = args.summary_out
+        orig_ds = DONE_SENTINEL
+        args.checkpoint = _smoke_path(args.checkpoint)
+        args.progress_log = _smoke_path(args.progress_log)
+        args.summary_out = _smoke_path(args.summary_out)
+        DONE_SENTINEL = _smoke_path(DONE_SENTINEL)
+        smoke_redirect_msg = (
+            f"smoke mode (--smoke={args.smoke}): rerouted "
+            f"checkpoint {orig_cp} -> {args.checkpoint}, "
+            f"progress {orig_pl} -> {args.progress_log}, "
+            f"summary {orig_su} -> {args.summary_out}, "
+            f"sentinel {orig_ds} -> {DONE_SENTINEL}"
+        )
+
+    PROGRESS_LOG = args.progress_log
+    CHECKPOINT = args.checkpoint
+
+    tiers = set(args.tier or [1, 2])
+    log_progress(f"=== INGEST FULL START brain={args.brain} smoke={args.smoke} tiers={sorted(tiers)} ===")
+    if smoke_redirect_msg:
+        log_progress(smoke_redirect_msg)
+
+    cp = load_checkpoint()
+    log_progress(f"checkpoint: {json.dumps({k:v for k,v in cp.items() if k!='updated_at'})[:600]}")
+
+    summary = {"started_at": datetime.now(timezone.utc).isoformat(),
+               "brain": args.brain, "smoke": args.smoke,
+               "run_timestamp": RUN_TIMESTAMP, "tiers": sorted(tiers)}
+
+    client = McpClient(args.brain, args.keyfile, log_stderr_to=args.mcp_stderr)
+    try:
+        # Status before
+        resp = client.call("lu4d_status", {})
+        sc = resp.get("result", {}).get("structuredContent", {}) if call_ok(resp) else {}
+        summary["bond_count_before"] = sc.get("bond_count", -1)
+        summary["node_count_before"] = sc.get("node_count", -1)
+        log_progress(f"status_before: bonds={summary['bond_count_before']} nodes={summary['node_count_before']}")
+
+        # Cat.1-retrain perf tweaks internal notes
+        # Hub-cap perf mitigation for Wikipedia-scale ingest:
+        # default 5000 caps cause O(degree) eviction lookups on hub nodes
+        # (year, person, place, ...) once at cap. Raised to 50000 just for
+        # the retrain run; re-tighten via runtime config post-retrain.
+        # NOTE: lu4d_configure does not accept hub_* fields in this binary;
+        # the dedicated tool is lu4d_hub_set (one key/value per call).
+        for k, v in (("max_in_degree", 50000), ("max_out_degree", 50000)):
+            r = client.call("lu4d_hub_set", {"key": k, "value": v})
+            log_progress(f"startup tweak: lu4d_hub_set {k}={v} ok={call_ok(r)}")
+        # Pause T.6 auto-tick for the retrain duration so curiosity research
+        # does not compete with ingest cycles for the MCP server.
+        # Resume manually post-retrain with lu4d_auto_tick_resume.
+        r = client.call("lu4d_auto_tick_pause", {})
+        log_progress(f"startup tweak: lu4d_auto_tick_pause ok={call_ok(r)}")
+
+        # BR.10b: trust seed pre-retrain wiring. When --seed-trust
+        # is set (operator opt-in for production retrain), call
+        # lu4d_trust_reset_to_defaults with seed_curriculum_corpora=true
+        # so the curriculum trust hierarchy is in place BEFORE any
+        # bonds land. Without this, every bond resolves to the 0.4
+        # default_multiplier instead of the seeded 1.0/0.9/0.7 values.
+        if args.seed_trust:
+            r = client.call("lu4d_trust_reset_to_defaults",
+                            {"seed_curriculum_corpora": True})
+            log_progress(f"startup tweak: lu4d_trust_reset_to_defaults "
+                         f"seed_curriculum_corpora=true ok={call_ok(r)}")
+            sc = r.get("result", {}).get("structuredContent", {}) if call_ok(r) else {}
+            cm = sc.get('corpus_multipliers', {}) or {}
+            log_progress(f"trust seed: corpus_multipliers "
+                         f"populated_count={len(cm)} "
+                         f"keys={sorted(cm.keys())[:3]}...")
+        else:
+            log_progress("startup tweak: --seed-trust NOT set, "
+                         "corpus_multipliers stays empty (every bond "
+                         "resolves to default_multiplier=0.4)")
+
+        if 1 in tiers:
+            summary["visual_genome"] = ingest_visual_genome(client, cp, args.smoke)
+            summary["wikipedia"] = ingest_wikipedia(client, cp, args.smoke)
+            summary["arxiv"] = ingest_arxiv(
+                client, cp, args.smoke,
+                set_spec=args.arxiv_set,
+                frm=args.arxiv_from,
+                until=args.arxiv_until,
+                max_papers=args.arxiv_max_papers,
+            )
+            summary["stackexchange"] = ingest_stackexchange(
+                client, cp, args.smoke,
+                xml_paths=args.se_xml_paths,
+                min_score=args.se_min_score,
+            )
+            summary["grokopedia"] = ingest_grokopedia(
+                client, cp, args.smoke,
+                seeds=args.grok_seeds,
+                sitemap_index_url=args.grok_sitemap,
+            )
+        if 2 in tiers:
+            summary["no_robots"] = ingest_no_robots(client, cp, args.smoke)
+            summary["instruction_dataset"] = ingest_instruction_dataset(client, cp, args.smoke)
+
+        # final save
+        log_progress("final lu4d_save")
+        save_resp = client.call("lu4d_save", {})
+        summary["final_save"] = save_resp.get("result", save_resp)
+
+        resp = client.call("lu4d_status", {})
+        sc = resp.get("result", {}).get("structuredContent", {}) if call_ok(resp) else {}
+        summary["bond_count_after"] = sc.get("bond_count", -1)
+        summary["node_count_after"] = sc.get("node_count", -1)
+        log_progress(f"status_after: bonds={summary['bond_count_after']} nodes={summary['node_count_after']}")
+
+        # success sentinel for the validator task
+        with open(DONE_SENTINEL, "w") as f:
+            json.dump({"completed_at": datetime.now(timezone.utc).isoformat(),
+                       "bond_count_after": summary["bond_count_after"]}, f)
+        log_progress(f"=== DONE — sentinel written to {DONE_SENTINEL} ===")
+    finally:
+        summary["ended_at"] = datetime.now(timezone.utc).isoformat()
+        try:
+            with open(args.summary_out, "w") as f:
+                json.dump(summary, f, indent=2, default=str)
+        except Exception as e:
+            log_progress(f"summary write failed: {e}")
+        client.close()
+
+if __name__ == "__main__":
+    main()

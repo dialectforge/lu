@@ -1,0 +1,15 @@
+lu4d_status	noop
+lu4d_pending_status	noop
+lu4d_trust_status	noop
+lu4d_freshness_status	noop
+lu4d_session_memory_status	noop
+lu4d_file_write	{"path":"/tmp/lu/probe.md","kind":"md","content":"# FILE-IO probe\nhello"}
+lu4d_file_read	{"path":"/tmp/lu/probe.md","route":{"Inspect":{}}}
+lu4d_file_write	{"path":"/tmp/lu/probe.json","kind":"json","content":{"k":"v"}}
+lu4d_file_read	{"path":"/tmp/lu/probe.json","route":{"Inspect":{}}}
+lu4d_file_write	{"path":"/tmp/lu/probe.csv","kind":"csv","content":[["col"],["val"]]}
+lu4d_file_read	{"path":"/tmp/lu/probe.csv","route":{"Inspect":{}}}
+lu4d_file_write	{"path":"/tmp/lu/probe.docx","kind":"docx","content":"docx probe"}
+lu4d_file_read	{"path":"/tmp/lu/probe.docx","route":{"Inspect":{}}}
+lu4d_file_write	{"path":"/tmp/lu/probe.pdf","kind":"pdf","content":"pdf probe content"}
+lu4d_file_read	{"path":"/tmp/lu/probe.pdf","route":{"Inspect":{}}}

@@ -1,0 +1,77 @@
+[package]
+name = "lu_brain_bench"
+version = "0.1.0"
+edition = "2021"
+description = "OP-BRAIN-V4 Phase 0 — v3 baseline benchmark harness for Lu (extended for OP-BRAIN-V5 Phase 0.b production-shape fixtures)"
+authors = ["John <info@dialectforge.com>"]
+
+# Phase 0 measures the v3 single-threaded baseline. Deliberately NO
+# rayon / no parallelization dep. v4 phases can add comparisons.
+[dependencies]
+lu4d = { path = "../.." }
+rand = "0.8"
+tempfile = "3"
+
+# OP-BRAIN-V5 Phase 0.b — production-shape fixture generator deps.
+# parquet 56.x sync reader for Wikipedia (no `arrow`, no `async` features
+# — sync row-group iteration only, keeps the dep cone small). zstd is
+# already transitively required by parquet for Wikipedias compression
+# codec. ureq is reused from the workspace for HF Hub LFS shard fetch.
+parquet = { version = "56", default-features = false, features = ["snap", "zstd", "lz4", "brotli"] }
+ureq = { version = "2.10", features = ["json", "tls"], default-features = false }
+sha2 = "0.10"
+serde_json = "1"
+md-5 = "0.10"
+
+[[bin]]
+name = "bench_v3"
+path = "src/bench_v3.rs"
+
+[[bin]]
+name = "bench_sst_read"
+path = "src/bench_sst_read.rs"
+
+[[bin]]
+name = "bench_memtable"
+path = "src/bench_memtable.rs"
+
+[[bin]]
+name = "bench_flush"
+path = "src/bench_flush.rs"
+
+[[bin]]
+name = "bench_read_v4"
+path = "src/bench_read_v4.rs"
+
+[[bin]]
+name = "bench_compaction"
+path = "src/bench_compaction.rs"
+
+[[bin]]
+name = "bench_migration"
+path = "src/bench_migration.rs"
+
+[[bin]]
+name = "bench_v4_boot"
+path = "src/bench_v4_boot.rs"
+
+# OP-BRAIN-V5 Phase 0.b — production-shape fixture generator.
+# Streams the wikimedia/wikipedia 20231101.en dataset directly from
+# the HF Hub via parquet shard download, runs each article through
+# the production extractor stack (lu4d::extractor::extract_from_article,
+# the Rust port of smart_extractor.py), and emits a length-prefixed
+# binary bond stream suitable for v5 substrate bench replay.
+[[bin]]
+name = "gen_prod_shape_fixture"
+path = "src/bin/gen_prod_shape_fixture.rs"
+
+# OP-BRAIN-V5 Phase 0.c — bounded-RSS assertion CLI.
+# Wraps the harness library (src/harness.rs) for ad-hoc threshold
+# checking against Phase 0.b .bench fixtures. Every later v5 phase
+# (1.0 through 8) calls this binary (or the harness lib directly) to
+# gate progress on a bounded-RSS budget. The workload selector picks
+# from a registered set; new phase workloads register without changing
+# the CLI shape.
+[[bin]]
+name = "bench_v5_assert"
+path = "src/bin/bench_v5_assert.rs"

@@ -1,0 +1,44 @@
+# OP-BRAIN-V5 6.6 -- PROPOSED systemd unit TEMPLATE for the v5 cutover.
+#
+# !!! TEMPLATE ONLY -- NOT AN APPLIED CHANGE !!!
+# This file is documentation. It is NOT installed and the live
+# lu.service is NOT modified by this milestone. Production stays on v3.
+# The actual unit swap happens in the separate Phase 8 cutover, after
+# the real 14 GB migration + offline verify (lu_brain_verify_v3_v5) +
+# soak. Copy/adapt this only when executing that runbook.
+#
+# Diff from the live v3 unit is intentionally minimal -- only the
+# --brain target and the added --brain-format v5 flag change. The
+# stable --brain path is the `brain-current` symlink (see
+# scripts/cutover/lu_v5_brain_current.sh), so a future cutover/rollback
+# is a one-line symlink swap with NO further unit edits.
+#
+# Live v3 ExecStart (for reference, do not change):
+#   ExecStart=/usr/local/bin/lu_4_mcp --mcp --require-encrypted \
+#       --keyfile /var/lib/lu/master.key --brain /var/lib/lu/brain.lbr --no-save
+
+[Unit]
+Description=Lu 4D MCP server (OP-BRAIN-V5 template -- not deployed)
+After=network.target
+
+[Service]
+Type=simple
+User=lu
+Group=lu
+# --brain points at the STABLE symlink, not a versioned dir directly.
+# brain-current -> brain.lbr today (v3); -> brain-v5-<date>/ after cutover.
+# --brain-format v5 is explicit until manifest auto-detect is the default
+# on this path; --require-encrypted + --keyfile are PRESERVED from v3 so a
+# plaintext brain can never load (the 6.5 guard enforces this for v5 dirs).
+ExecStart=/usr/local/bin/lu_4_mcp \
+    --mcp \
+    --require-encrypted \
+    --keyfile /var/lib/lu/master.key \
+    --brain /var/lib/lu/brain-current \
+    --brain-format v5 \
+    --no-save
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

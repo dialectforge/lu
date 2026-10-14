@@ -1,0 +1,5 @@
+lu4d_auto_tick_status	noop
+lu4d_configure	noop
+lu4d_auto_tick_pause	noop
+lu4d_auto_tick_resume	noop
+lu4d_ask	what is photosynthesis

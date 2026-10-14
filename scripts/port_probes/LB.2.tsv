@@ -1,0 +1,10 @@
+lu4d_session_memory_status	noop
+lu4d_session_memory_inspect	noop
+lu4d_status	noop
+lu4d_pending_status	noop
+lu4d_auto_tick_status	noop
+lu4d_session_start	noop
+lu4d_ask	what is photosynthesis
+lu4d_wonder	noop
+lu4d_save	noop
+lu4d_status	noop

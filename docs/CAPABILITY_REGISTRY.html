@@ -1,0 +1,617 @@
+<!DOCTYPE html>
+<html lang='en'><head><meta charset='utf-8'><title>Lu &mdash; Capability Registry (Master Census)</title><style>
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; margin:0; padding:0; background:#fff; color:#222; line-height:1.5; }
+  .topbar { background:#1b1f23; color:#fff; padding:14px 24px; position:sticky; top:0; z-index:10; box-shadow:0 2px 4px rgba(0,0,0,0.15); }
+  .topbar b { font-size:1.05em; }
+  .wrap { max-width:1120px; margin:0 auto; padding:28px 30px 80px; }
+  h1 { font-size:1.7em; border-bottom:3px solid #1b1f23; padding-bottom:8px; }
+  h2 { font-size:1.32em; margin-top:2em; border-bottom:1px solid #ddd; padding-bottom:5px; }
+  h3 { font-size:1.08em; margin-top:1.6em; color:#1b1f23; }
+  code { background:#f2f3f5; padding:1px 5px; border-radius:4px; font-size:0.9em; font-family:'SFMono-Regular',Consolas,'Liberation Mono',Menlo,monospace; }
+  pre { background:#0f1419; color:#e6e6e6; padding:14px 16px; border-radius:7px; overflow-x:auto; }
+  pre code { background:none; color:inherit; padding:0; }
+  table { border-collapse:collapse; width:100%; margin:14px 0; font-size:0.9em; }
+  th, td { border:1px solid #dcdfe3; padding:7px 9px; text-align:left; vertical-align:top; }
+  th { background:#eef1f4; font-weight:700; }
+  tr:nth-child(even) td { background:#fafbfc; }
+  hr { border:none; border-top:1px solid #e2e2e2; margin:2em 0; }
+  blockquote { border-left:4px solid #cbd2d9; margin:0; padding:2px 14px; color:#444; background:#f7f8fa; }
+  a { color:#0b4a8a; }
+</style></head><body><div class='topbar'><b>Lu &mdash; Capability Registry</b> &nbsp;&middot;&nbsp; master census &nbsp;&middot;&nbsp; main @ d51d62f &nbsp;&middot;&nbsp; 2026-07-23 &nbsp;&middot;&nbsp; read-only</div><div class='wrap'><h1>Lu — Capability Registry (Master Census)</h1>
+<p><strong>Branch:</strong> <code>main</code> @ <code>d51d62f</code> · <strong>Tree:</strong> <code>/opt/lu/lu/merge-main</code> (worktree of <code>/opt/lu/lu/v4/.git</code>) · <strong>Date:</strong> 2026-07-23
+<strong>Scope:</strong> read-only census of <em>every</em> capability-bearing module in the tree — not just those reachable from the ask path. No code / brain / training touched. Retrain <code>lu4d-cat1-ingest</code> active and undisturbed throughout.
+<strong>Companion:</strong> extends <code>docs/LIVE_PATH_WIRING_MAP.md</code> (committed <code>d51d62f</code>, internal notes, which traced 11 faculties reachable from <code>narrate()</code>. This census adds the capabilities that are <strong>NOT</strong> reachable from the ask path — admin-only tools, orphaned subsystems, and things that live only on branches.</p>
+<hr />
+<h2>How to read this</h2>
+<p>Every capability is in exactly one <strong>state</strong>:</p>
+<table>
+<thead>
+<tr>
+<th>Badge</th>
+<th>State</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>LIVE-GUEST</td>
+<td><strong>LIVE-GUEST</strong></td>
+<td>Reachable by a real user through <code>lu4d_ask</code> today.</td>
+</tr>
+<tr>
+<td>CONDITIONAL</td>
+<td><strong>CONDITIONAL</strong></td>
+<td>Wired into the guest <code>narrate()</code> path but gated behind a heuristic / activation floor, so it fires only on some queries.</td>
+</tr>
+<tr>
+<td>DARK-ADMIN</td>
+<td><strong>DARK-ADMIN</strong></td>
+<td>Fully built and compiled into the binary, but its only caller is the admin <code>src/mcp.rs</code> dispatch — which is <strong><code>#[cfg(feature = "admin_mcp")]</code></strong> and <strong>compiled out of the guest binary</strong>. Present, tested, unreachable by users.</td>
+</tr>
+<tr>
+<td>ORPHANED</td>
+<td><strong>ORPHANED</strong></td>
+<td>The code exists and compiles, but <strong>nothing in the production tree calls it</strong> — not even admin. A subsystem with no caller.</td>
+</tr>
+<tr>
+<td>ABSENT</td>
+<td><strong>ABSENT-FROM-MAIN</strong></td>
+<td>Not on <code>main</code> at all. Lives only on a feature branch, or exists only as a router <em>intent slot</em> + roadmap with no implementation.</td>
+</tr>
+</tbody>
+</table>
+<p><strong>The one structural fact that explains most of this:</strong> at OP-007 (privsep, <code>85c593f</code>, 2026-07-18) Lu split into two binaries. The guest binary is built <code>default-features = false</code>, which compiles the entire <code>src/mcp.rs</code> module — the ~40-tool dispatch — <strong>out</strong>. Guest exposes only <code>lu4d_ask</code> + <code>session_start/end</code>, and <code>lu4d_ask</code> calls <code>Brain::narrate(...)</code> and nothing else. So the rule of thumb is: <strong>if a capability's only entry point is a <code>lu4d_*</code> MCP tool, it is DARK on the live path</strong>, because the whole tool surface is admin-only. The underlying <em>modules</em> (math, file_io, vision, capability_runtime) are still linked into the guest binary — they just have no caller on the guest surface.</p>
+<hr />
+<h2>Part 1 — Plain-language accounting of every capability John named</h2>
+<p>This is the "account for EACH by name" section. For each thing John remembered, here is exactly where it lives and its honest state.</p>
+<h3>1. Sandbox / code-execution capability — <strong>PRESENT on main, <span style='display:inline-block;padding:1px 7px;border-radius:10px;font-weight:700;font-size:0.82em;color:#0b4a8a;background:#d6e6fb;white-space:nowrap;'>DARK-ADMIN</span>, master-switch OFF</strong></h3>
+<p>It exists and it is real. It is the <strong>capability-pack execution runtime</strong>, <code>src/capability_runtime/mod.rs</code> (Port Cat.5.1). Its own header: <em>"Cat.5.1 ships the runtime half: load an installed pack, RE-VERIFY it … instantiate its declared tools behind an object-safe <code>PackTool</code> trait … make them callable through MCP dynamic dispatch."</em> The concrete executor is <code>SubprocessPackTool</code> — third-party code run across an <strong>OS process boundary</strong> under resource caps, default-DENY permissions, no <code>unsafe</code>. WASM is deferred; full-privilege dlopen is rejected outright.
+- <strong>Where:</strong> <code>src/capability_runtime/</code> + MCP surface <code>src/mcp_cap_runtime.rs</code> (<code>lu4d_capability_pack_runtime_configure/status/load/unload</code>, and a <code>pack__*</code> dynamic-dispatch fallback in <code>mcp.rs::handle_tools_call_inner</code>).
+- <strong>State:</strong> <span style='display:inline-block;padding:1px 7px;border-radius:10px;font-weight:700;font-size:0.82em;color:#0b4a8a;background:#d6e6fb;white-space:nowrap;'>DARK-ADMIN</span>. Reachable only via <code>src/mcp.rs</code> (compiled out of guest). Additionally gated by a <strong>master switch that defaults OFF</strong> plus an unsandboxed opt-in. So even on the admin binary it does nothing until explicitly configured on.
+- <strong>Not</strong> a general "run any code" sandbox for the model's own use — it is an execution host for signed capability packs. That is the closest thing Lu has to a sandbox, and it is genuinely built.</p>
+<h3>2. Coding functions (code generation / code tools) — <strong>GENUINELY <span style='display:inline-block;padding:1px 7px;border-radius:10px;font-weight:700;font-size:0.82em;color:#8a1220;background:#fbd6da;white-space:nowrap;'>ABSENT</span> as an implementation</strong></h3>
+<p>There is <strong>no code-generation capability</strong> on <code>main</code>. What exists is only the <em>recognition</em> of a coding request: <code>RoutingDecision.code_intent</code> (<code>src/query_router.rs:72</code>), with the comment <em>"Phase 6 will wire code generation here."</em> The router can tell that a query is asking for code (it requires a code-generation verb like "write"/"generate"), sets the flag — and nothing consumes it. The roadmap for this is internal notes ("Lu Code Capability").
+- <strong>Partial exception — reading/writing code files:</strong> <code>src/file_io.rs</code> has a <code>FileKind::Code</code> that reads and writes source files as UTF-8 text (see #5/#6 below). So Lu can <em>carry</em> code as a file; it cannot <em>generate</em> it.
+- <strong>Honest verdict:</strong> the <em>intent detector</em> is present; the <em>generator</em> is absent (roadmap only). This is one of the two things John named that is truly not built, not merely unwired.</p>
+<h3>3. Image tools — <strong>PRESENT on main, <span style='display:inline-block;padding:1px 7px;border-radius:10px;font-weight:700;font-size:0.82em;color:#0b4a8a;background:#d6e6fb;white-space:nowrap;'>DARK-ADMIN</span></strong></h3>
+<p><code>src/mcp_vision.rs</code> + <code>src/vision/</code> (Port R input). Three tools: <code>lu4d_image_ingest</code> (run the configured <code>SceneGraphExtractor</code>, route extracted triplets through teach/user_statement), <code>lu4d_image_describe</code> (inspect-only, human-readable), <code>lu4d_image_extractor_status</code> (diagnostic). The extractor is a pluggable trait (<code>SceneGraphExtractor</code>) with a <code>StubExtractor</code> (dev default) and a <code>SubprocessExtractor</code> (external CLI).
+- <strong>State:</strong> <span style='display:inline-block;padding:1px 7px;border-radius:10px;font-weight:700;font-size:0.82em;color:#0b4a8a;background:#d6e6fb;white-space:nowrap;'>DARK-ADMIN</span> — all three tools are admin-only; the guest surface has no image entry point. The default extractor is the Stub unless a subprocess extractor is configured, so even on admin it returns nothing useful until wired to an external vision CLI.</p>
+<h3>4. Image geometry math system — <strong>PRESENT on main but <span style='display:inline-block;padding:1px 7px;border-radius:10px;font-weight:700;font-size:0.82em;color:#9a4a00;background:#ffe4cc;white-space:nowrap;'>ORPHANED</span>; the autonomous image→geometry loop is <span style='display:inline-block;padding:1px 7px;border-radius:10px;font-weight:700;font-size:0.82em;color:#8a1220;background:#fbd6da;white-space:nowrap;'>ABSENT</span> from main</strong></h3>
+<p>Two distinct things here:
+- <strong>The geometry solver</strong> <code>src/math/geometry.rs</code> (Port G, "verifiable geometry pipeline") is real and sophisticated: an exact <code>a + b·π</code> evaluator (π stays symbolic — answers come out <code>32*pi - 64</code>, not a float), a canonical primitive-area library (quarter-circle, circular segment, triangle, shoelace polygon), a <code>Scene</code> topology record, and a sum-to-whole <strong>verifier</strong> as an honesty gate. <strong>But it is <span style='display:inline-block;padding:1px 7px;border-radius:10px;font-weight:700;font-size:0.82em;color:#9a4a00;background:#ffe4cc;white-space:nowrap;'>ORPHANED</span>:</strong> the only tree-wide reference to <code>geometry</code> outside its own module and tests is a <em>content bond</em> in a narration test (<code>"geometry" IsA "math"</code>). It is <strong>not</strong> in the arithmetic cascade, <strong>not</strong> called by <code>detect_math</code>, <strong>not</strong> called by vision. A fully built subsystem with zero production callers.
+- <strong>The image→scene→geometry autonomous pipeline</strong> (perceive a diagram, build the Scene, solve exactly) that the project log learnings describe (geometry autonomous loop, 2026-06-28) lives as <strong>Python prototypes and on the <code>v4</code> worktree</strong>, not on <code>main</code>. On <code>main</code> the solver has no perception feeding it. So the "image geometry math system" as an end-to-end capability is <span style='display:inline-block;padding:1px 7px;border-radius:10px;font-weight:700;font-size:0.82em;color:#8a1220;background:#fbd6da;white-space:nowrap;'>ABSENT</span> from main; only its exact-solver core is present-but-orphaned.</p>
+<h3>5. File tools — <strong>PRESENT on main, <span style='display:inline-block;padding:1px 7px;border-radius:10px;font-weight:700;font-size:0.82em;color:#0b4a8a;background:#d6e6fb;white-space:nowrap;'>DARK-ADMIN</span></strong></h3>
+<p><code>src/file_io.rs</code> + <code>src/mcp_file_io.rs</code> (Port File-IO). Tools: <code>lu4d_file_read</code>, <code>lu4d_file_write</code>, <code>lu4d_file_extract_to_pending</code>. Files are treated as a <em>transport</em>: content flows through the existing teach / user_statement ingest paths, stamped with a <code>file://</code> provenance URI so <code>lu4d_revoke_by_source</code> still works.
+- <strong>State:</strong> <span style='display:inline-block;padding:1px 7px;border-radius:10px;font-weight:700;font-size:0.82em;color:#0b4a8a;background:#d6e6fb;white-space:nowrap;'>DARK-ADMIN</span>. Compiled into the guest binary (its deps <code>csv</code>, <code>lopdf</code>/<code>pdf-extract</code> are linked into <code>lu_guest_http</code>), but the tool wrappers are reachable only through the admin dispatch.</p>
+<h3>6. Document tools — <strong>SAME MODULE as file tools (Port File-IO), <span style='display:inline-block;padding:1px 7px;border-radius:10px;font-weight:700;font-size:0.82em;color:#0b4a8a;background:#d6e6fb;white-space:nowrap;'>DARK-ADMIN</span></strong></h3>
+<p>In Lu, "document tools" are not a separate subsystem — they are the format-aware half of Port File-IO. <code>FileKind</code> = { Md, Txt, Csv, Json, <strong>Pdf</strong>, <strong>Docx</strong>, Code }.
+- <strong>READ:</strong> md/txt verbatim, csv (pure-Rust <code>csv</code>), json (serde), <strong>pdf</strong> (<code>pdf-extract</code>, text only), <strong>docx</strong> (hand-rolled <code>&lt;w:t&gt;</code> extractor over <code>word/document.xml</code>), code (UTF-8).
+- <strong>WRITE:</strong> md/txt, csv, json, <strong>pdf</strong> (<code>printpdf</code> single-page text), <strong>docx</strong> (hand-rolled OOXML emitter).
+- <code>lu4d_file_extract_to_pending</code> is the structured-doc convenience (CSV/JSON → T.3 PendingLog).
+- <strong>State:</strong> <span style='display:inline-block;padding:1px 7px;border-radius:10px;font-weight:700;font-size:0.82em;color:#0b4a8a;background:#d6e6fb;white-space:nowrap;'>DARK-ADMIN</span>, same as #5. So PDF and DOCX reading/writing genuinely exist and are genuinely unreachable by a user.</p>
+<h3>7. The three math systems — all PRESENT; distinguished below</h3>
+<p>Lu actually has <strong>four</strong> arithmetic/math detectors plus the orphaned geometry solver. They are distinct modules with a defined cascade order.</p>
+<table>
+<thead>
+<tr>
+<th>System</th>
+<th>Module / entry</th>
+<th>What it handles</th>
+<th>Cascade slot</th>
+<th>State</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Regular math (arithmetic)</strong></td>
+<td><code>src/math.rs</code> <code>detect_arithmetic</code> (<code>:177</code>)</td>
+<td>single binary op, %, sqrt, comparisons, "half of"</td>
+<td>F.1</td>
+<td><strong>LIVE-GUEST</strong> (replicated into <code>guest_ask</code>, commit <code>439e2e8</code>)</td>
+</tr>
+<tr>
+<td><strong>Full calculator</strong></td>
+<td><code>src/math.rs</code> <code>detect_math</code> (<code>:516</code>)</td>
+<td>recursive-descent expressions, scientific fns, constants, <strong>unit conversion</strong>, <strong>descriptive stats</strong>, <strong>linear solver</strong></td>
+<td>F.2</td>
+<td>DARK-ADMIN (called at <code>mcp.rs:1641</code>; guest never calls it)</td>
+</tr>
+<tr>
+<td><strong>Construction calculator</strong></td>
+<td><code>src/math/construction.rs</code> <code>detect_construction</code></td>
+<td>feet-inches, lumber/framing/concrete</td>
+<td>F.4 (fires before F.2)</td>
+<td>DARK-ADMIN</td>
+</tr>
+<tr>
+<td><strong>Word-problem calculator</strong></td>
+<td><code>src/math/wordprob.rs</code> <code>detect_word_problem</code></td>
+<td>prose word problems w/ honest hedging + gap-signal emit</td>
+<td>F.3</td>
+<td>DARK-ADMIN</td>
+</tr>
+<tr>
+<td><strong>Verifiable geometry (image/geometry math)</strong></td>
+<td><code>src/math/geometry.rs</code></td>
+<td>exact shaded-area / <code>a+b·π</code>, partition-verify</td>
+<td><em>not in cascade</em></td>
+<td><strong>ORPHANED</strong></td>
+</tr>
+</tbody>
+</table>
+<p>The cascade <code>try_arithmetic_response_with</code> (<code>src/mcp.rs:1543</code>) runs <strong>F.1 → F.4 → F.3 → F.2 → recall</strong>. Geometry is not in it. So the three that John means as "regular math / word-problem calculator / image-geometry math" map cleanly to: <strong><code>math.rs</code> (regular)</strong>, <strong><code>math/wordprob.rs</code> (word problem)</strong>, <strong><code>math/geometry.rs</code> (geometry)</strong> — with the important caveat that on the <em>guest</em> only regular arithmetic survives, and geometry has no caller anywhere. (Bonus orphans inside the math tree: <code>math/autochord.rs</code> — 0 callers; <code>math/arrangement.rs</code> — 1.)</p>
+<h3>8. "The part that identifies a prompt for its needs" — <strong>PRESENT, and this is the architecturally central finding</strong></h3>
+<p>This is the <strong>prompt-need identifier / dispatcher</strong>, and Lu has it in layers. The load-bearing one is <code>src/query_router.rs</code> — <code>QueryRouter::route</code> produces a <code>RoutingDecision</code> that reads a query and decides which capability ports it needs. Its fields are the complete "needs" vocabulary:</p>
+<pre><code>needs_math            references_file_path      code_intent
+needs_deep_reasoning  references_image_path     is_meta_query
+needs_variants        needs_critic_vetting      needs_agentic_thinking
+</code></pre>
+<p>Its own header states the intended design: <em>"Phase 3+ ports will wire <code>think()</code>, <code>variants()</code>, </em><em>file_io, vision, and code-gen</em><em> invocations off these flags."</em> <strong>This is the map of what Lu was supposed to become — agentic — versus what actually got wired.</strong> The router already <em>detects</em> file-path references, image-path references, and code intent. <strong>Nothing consumes those three.</strong> Only <code>needs_math</code>, <code>needs_deep_reasoning</code>, <code>needs_variants</code>, <code>needs_critic_vetting</code>, <code>needs_agentic_thinking</code>, and <code>is_meta_query</code> got wired into <code>narrate()</code> (via OP-ROUTE-3a/3b/3c). So the dispatcher's <em>intended routing table</em> is strictly larger than its <em>actual</em> one: it can already tell that a query wants a file, an image, or code — and there is no arm that acts on that knowledge.</p>
+<p>The <strong>fuller planners</strong> the router was meant to drive:
+- <code>src/thinking.rs</code> — the ReAct <strong>Observe → Plan → Act → Reflect</strong> loop (the "Left Brain"). <span style='display:inline-block;padding:1px 7px;border-radius:10px;font-weight:700;font-size:0.82em;color:#8a5a00;background:#fdeecb;white-space:nowrap;'>CONDITIONAL</span> on guest.
+- <code>src/agents.rs</code> — the <strong>multi-agent</strong> orchestrator (RecallAgent → SynthesisAgent → CriticAgent, scope-isolated). <span style='display:inline-block;padding:1px 7px;border-radius:10px;font-weight:700;font-size:0.82em;color:#8a5a00;background:#fdeecb;white-space:nowrap;'>CONDITIONAL</span> on guest (fires via <code>needs_critic_vetting</code>).
+- <code>src/reasoning.rs</code> — chain articulation ("Therefore… / Which means…"). <span style='display:inline-block;padding:1px 7px;border-radius:10px;font-weight:700;font-size:0.82em;color:#8a5a00;background:#fdeecb;white-space:nowrap;'>CONDITIONAL</span> on guest.
+- The admin <code>tool_ask</code> orchestration in <code>src/mcp.rs</code> adds the Q.3 session pre-pass on top — admin-only.</p>
+<p><strong>Verdict:</strong> the need-identifier is present and is the single most important lever for making Lu agentic. Making Lu act on <code>references_file_path</code> / <code>references_image_path</code> / <code>code_intent</code> (plus threading these through <code>narrate()</code> on the guest) is the difference between "a recall engine" and "an agent that reaches for the right tool." The machinery to <em>decide</em> is built; the machinery to <em>act on the decision</em> is the gap.</p>
+<h3>9. Off-ness / Cattle Dog — <strong>GENUINELY <span style='display:inline-block;padding:1px 7px;border-radius:10px;font-weight:700;font-size:0.82em;color:#8a1220;background:#fbd6da;white-space:nowrap;'>ABSENT</span> from main (branch-only)</strong></h3>
+<p><code>src/offness.rs</code> (402 LOC), <code>eval/offness/</code>, and <code>examples/offness_harness.rs</code> exist <strong>only</strong> on <code>feature/op-offness-1-cattledog-port</code>. That branch is a large, stale divergence from <code>main</code> (it deletes <code>read_only_reader.rs</code>, <code>wonder_sidecar.rs</code>, <code>near_miss.rs</code>, <code>canonical.rs</code>, and rewrites <code>network.rs</code>; it also carries a branch-only <code>src/embedding.rs</code>). Porting it is a genuine feature merge against an old base, not a rewiring. Confirmed absent, as the wiring map said.</p>
+<hr />
+<h2>Part 2 — Master capability registry</h2>
+<p>Grouped by state. Columns: <strong>Capability · What it is · Module:file · On main? · Wired to a live path? · Invoked by (or orphaned) · Reconnect/port cost.</strong></p>
+<h3>LIVE-GUEST — reachable by a real user today</h3>
+<table>
+<thead>
+<tr>
+<th>Capability</th>
+<th>What it is</th>
+<th>Module</th>
+<th>On main</th>
+<th>Live path</th>
+<th>Invoked by</th>
+<th>Cost</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Seed + spread recall</td>
+<td>associative activation over the graph</td>
+<td><code>network.rs</code>, <code>brain.ask_with_config</code></td>
+<td>yes</td>
+<td>yes guest</td>
+<td><code>narrate()</code> core</td>
+<td>—</td>
+</tr>
+<tr>
+<td>idk / refusal floor</td>
+<td>fabrication guard on unknowns</td>
+<td><code>idk_gate.rs</code></td>
+<td>yes</td>
+<td>yes guest</td>
+<td><code>narrate():3092</code></td>
+<td>wired</td>
+</tr>
+<tr>
+<td>Recall → narration graph-walker</td>
+<td>turns activated bonds into prose</td>
+<td><code>narration.rs</code>, <code>network.rs</code></td>
+<td>yes</td>
+<td>yes guest</td>
+<td><code>narrate()</code></td>
+<td>wired (residency-dependent)</td>
+</tr>
+<tr>
+<td>Greet refusal</td>
+<td>guards greetings/non-questions</td>
+<td><code>greet_refusal.rs</code></td>
+<td>yes</td>
+<td>yes guest</td>
+<td><code>guest_ask:160</code></td>
+<td>wired</td>
+</tr>
+<tr>
+<td>Regular arithmetic</td>
+<td>F.1 single-op / %/sqrt</td>
+<td><code>math.rs::detect_arithmetic</code></td>
+<td>yes</td>
+<td>yes guest</td>
+<td><code>guest_ask:129</code> (<code>439e2e8</code>)</td>
+<td>wired</td>
+</tr>
+<tr>
+<td>Self-identity / meta short-circuits</td>
+<td>"who are you" etc.</td>
+<td><code>narration.rs:2988</code></td>
+<td>yes</td>
+<td>yes guest</td>
+<td><code>narrate()</code></td>
+<td>wired</td>
+</tr>
+<tr>
+<td>16-shape renderer + style hints</td>
+<td>output shaping</td>
+<td><code>narration.rs</code> Renderer</td>
+<td>yes</td>
+<td>yes guest</td>
+<td><code>narrate()</code></td>
+<td>wired</td>
+</tr>
+</tbody>
+</table>
+<h3>CONDITIONAL — wired to guest <code>narrate()</code>, gated behind heuristics</h3>
+<table>
+<thead>
+<tr>
+<th>Capability</th>
+<th>What it is</th>
+<th>Module</th>
+<th>On main</th>
+<th>Live path</th>
+<th>Gate</th>
+<th>Cost to fully reach</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Reasoning chains</td>
+<td>procedural / list / comparison articulation</td>
+<td><code>reasoning.rs</code></td>
+<td>yes</td>
+<td>cond. guest</td>
+<td><code>needs_deep_reasoning &amp;&amp; !math &amp;&amp; !meta</code></td>
+<td>tune triggers</td>
+</tr>
+<tr>
+<td>Left Brain / thinking</td>
+<td>ReAct Observe→Plan→Act→Reflect</td>
+<td><code>thinking.rs</code></td>
+<td>yes</td>
+<td>cond. guest</td>
+<td><code>use_multi_think</code> hardcoded <code>false</code>; else <code>needs_critic_vetting</code>/<code>needs_agentic_thinking</code> + activation floor</td>
+<td>raise reachability</td>
+</tr>
+<tr>
+<td>Multi-agent (Recall/Synthesis/Critic)</td>
+<td>scope-isolated belief vetting</td>
+<td><code>agents.rs</code></td>
+<td>yes</td>
+<td>cond. guest</td>
+<td>fires via <code>needs_critic_vetting</code></td>
+<td>tune</td>
+</tr>
+<tr>
+<td>Variant arena</td>
+<td>candidate-answer generation + promote</td>
+<td><code>variants.rs</code></td>
+<td>yes</td>
+<td>cond. guest</td>
+<td><code>needs_variants</code></td>
+<td>tune</td>
+</tr>
+<tr>
+<td>Query router / IntentClassifier</td>
+<td><strong>prompt-need identifier</strong></td>
+<td><code>query_router.rs</code>, <code>narration.rs</code> IntentClassifier</td>
+<td>yes</td>
+<td>cond. guest</td>
+<td>6 of 9 flags consumed; file/image/code flags <strong>not</strong> consumed</td>
+<td>wire the 3 unused flags</td>
+</tr>
+<tr>
+<td>Curiosity producer</td>
+<td>gap detection during answering</td>
+<td><code>curiosity.rs</code>, <code>wonder_sidecar.rs</code></td>
+<td>yes</td>
+<td>cond. guest</td>
+<td>only if guest launched <code>--wonder-queue</code></td>
+<td>ops</td>
+</tr>
+</tbody>
+</table>
+<h3>DARK-ADMIN — built + compiled in, but only callable from the admin <code>mcp.rs</code> dispatch (compiled out of guest)</h3>
+<table>
+<thead>
+<tr>
+<th>Capability</th>
+<th>What it is</th>
+<th>Module</th>
+<th>On main</th>
+<th>Live path</th>
+<th>Invoked by</th>
+<th>Reconnect cost</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Sandbox / code-execution runtime</strong></td>
+<td>subprocess execution of signed capability packs, resource-capped</td>
+<td><code>capability_runtime/</code>, <code>mcp_cap_runtime.rs</code></td>
+<td>yes</td>
+<td>dark (master-switch OFF)</td>
+<td><code>mcp.rs</code> dynamic <code>pack__*</code></td>
+<td>large — security-sensitive; keep gated</td>
+</tr>
+<tr>
+<td>Capability-pack schema (Cat.5)</td>
+<td>signed <code>.lupack5</code> format + publisher trust + install ledger</td>
+<td><code>capability_pack/</code>, <code>mcp_cat5.rs</code></td>
+<td>yes</td>
+<td>dark</td>
+<td><code>mcp.rs</code> (7 <code>lu4d_capability_pack_*</code>)</td>
+<td>admin only by design</td>
+</tr>
+<tr>
+<td>Content/safety packs (Cat.4)</td>
+<td>signed <code>.lupack</code> knowledge bundles (add facts w/o retrain)</td>
+<td><code>pack/</code>, <code>mcp_pack.rs</code></td>
+<td>yes</td>
+<td>dark</td>
+<td><code>mcp.rs</code> (6 <code>lu4d_pack_*</code>)</td>
+<td>admin only by design</td>
+</tr>
+<tr>
+<td><strong>Image / vision tools</strong></td>
+<td>scene-graph triplet extraction from images</td>
+<td><code>vision/</code>, <code>mcp_vision.rs</code></td>
+<td>yes</td>
+<td>dark</td>
+<td><code>mcp.rs</code> (3 <code>lu4d_image_*</code>)</td>
+<td>wire to <code>guest_ask</code> + configure a real extractor</td>
+</tr>
+<tr>
+<td><strong>File tools</strong></td>
+<td>read/write md/txt/csv/json/code as transport</td>
+<td><code>file_io.rs</code>, <code>mcp_file_io.rs</code></td>
+<td>yes</td>
+<td>dark</td>
+<td><code>mcp.rs</code> (<code>lu4d_file_read/write</code>)</td>
+<td>thread through guest + router <code>references_file_path</code></td>
+</tr>
+<tr>
+<td><strong>Document tools</strong></td>
+<td>PDF/DOCX/markdown read + emit; CSV/JSON → pending</td>
+<td><code>file_io.rs</code> (FileKind Pdf/Docx/Md), <code>mcp_file_io.rs</code></td>
+<td>yes</td>
+<td>dark</td>
+<td><code>mcp.rs</code> (<code>lu4d_file_extract_to_pending</code>)</td>
+<td>same as file tools</td>
+</tr>
+<tr>
+<td>Full calculator (F.2)</td>
+<td>expressions, units, stats, linear solver</td>
+<td><code>math.rs::detect_math</code> + <code>math/{expr,units,stats,solve}.rs</code></td>
+<td>yes</td>
+<td>dark</td>
+<td><code>mcp.rs:1641</code> cascade</td>
+<td>~15 LOC to add <code>detect_math</code> to <code>guest_ask</code></td>
+</tr>
+<tr>
+<td>Construction calculator (F.4)</td>
+<td>feet-inches / framing math</td>
+<td><code>math/construction.rs</code></td>
+<td>yes</td>
+<td>dark</td>
+<td>cascade <code>mcp.rs:1543</code></td>
+<td>rides on the F.2 guest wire</td>
+</tr>
+<tr>
+<td>Word-problem calculator (F.3)</td>
+<td>prose word problems + hedging</td>
+<td><code>math/wordprob.rs</code></td>
+<td>yes</td>
+<td>dark</td>
+<td>cascade <code>mcp.rs:1543</code></td>
+<td>rides on the F.2 guest wire</td>
+</tr>
+<tr>
+<td>Web research</td>
+<td>HTTP fetch + DuckDuckGo/Grokipedia + research loop/chain</td>
+<td><code>research/</code>, <code>mcp.rs</code> (<code>lu4d_research*</code>)</td>
+<td>yes</td>
+<td>dark</td>
+<td><code>mcp.rs</code></td>
+<td>large — network egress + guest surface</td>
+</tr>
+<tr>
+<td>Teach / learn / ingest</td>
+<td><code>teach</code>, <code>learn_text</code>, <code>teach_corpus</code>, <code>user_statement</code></td>
+<td><code>mcp.rs</code>, <code>mcp_extractor.rs</code>, <code>extractor/</code></td>
+<td>yes</td>
+<td>dark</td>
+<td><code>mcp.rs</code></td>
+<td>admin/offline by design</td>
+</tr>
+<tr>
+<td>Session memory (Q.3) store</td>
+<td>Left-Brain conversational session layer</td>
+<td><code>lb_session/</code>, <code>mcp_lb.rs</code></td>
+<td>yes</td>
+<td>store reachable, reader/writer dark</td>
+<td><code>mcp.rs</code> (<code>lu4d_session_memory_*</code>)</td>
+<td>thread <code>session_id</code> through <code>narrate()</code> + port Q.3 pre-pass</td>
+</tr>
+<tr>
+<td>Style adaptation</td>
+<td>output-style profile + WAL</td>
+<td><code>style/</code>, <code>mcp_cs.rs</code></td>
+<td>yes</td>
+<td>dark</td>
+<td><code>mcp.rs</code> (<code>lu4d_style_*</code>)</td>
+<td>medium</td>
+</tr>
+<tr>
+<td>Trust / source attribution</td>
+<td>per-source trust weights + revoke-by-source</td>
+<td><code>trust.rs</code>, <code>source.rs</code>, <code>mcp_cat3a.rs</code></td>
+<td>yes</td>
+<td>dark</td>
+<td><code>mcp.rs</code> (<code>lu4d_trust_*</code>)</td>
+<td>admin</td>
+</tr>
+<tr>
+<td>Scar / unscar</td>
+<td>suppress bad concepts/bonds</td>
+<td><code>scar.rs</code></td>
+<td>yes</td>
+<td>dark (overlay applies on read)</td>
+<td><code>mcp.rs</code> (<code>lu4d_scar_*</code>)</td>
+<td>admin</td>
+</tr>
+<tr>
+<td>Time service</td>
+<td>authenticated time, anomaly, timetravel query</td>
+<td><code>time/</code>, <code>mcp.rs</code> (<code>lu4d_time_status</code>,<code>lu4d_timetravel</code>)</td>
+<td>yes</td>
+<td>dark</td>
+<td><code>mcp.rs</code></td>
+<td>admin</td>
+</tr>
+<tr>
+<td>Sense runtime</td>
+<td>runtime sensing/config</td>
+<td><code>sense.rs</code>, <code>mcp_sense.rs</code></td>
+<td>yes</td>
+<td>dark</td>
+<td><code>mcp.rs</code> (<code>lu4d_sense_*</code>)</td>
+<td>admin</td>
+</tr>
+<tr>
+<td>Hub-degree governance</td>
+<td>high-degree-node handling</td>
+<td><code>hub_degree.rs</code>, <code>mcp_cat3b.rs</code></td>
+<td>yes</td>
+<td>dark</td>
+<td><code>mcp.rs</code> (<code>lu4d_hub_*</code>)</td>
+<td>admin</td>
+</tr>
+<tr>
+<td>Idle loop / auto-tick</td>
+<td>background maintenance ticks</td>
+<td><code>idle/</code>, <code>mcp_t6.rs</code></td>
+<td>yes</td>
+<td>dark</td>
+<td><code>mcp.rs</code> (<code>lu4d_auto_tick_*</code>,<code>lu4d_idle_tick</code>)</td>
+<td>ops</td>
+</tr>
+<tr>
+<td>Pending / proposals</td>
+<td>approve/reject staged changes</td>
+<td><code>pending/</code>, <code>mcp_t3.rs</code></td>
+<td>yes</td>
+<td>dark</td>
+<td><code>mcp.rs</code> (<code>lu4d_*_pending</code>,<code>lu4d_proposal*</code>)</td>
+<td>admin</td>
+</tr>
+</tbody>
+</table>
+<h3>ORPHANED — exists and compiles, but nothing calls it (not even admin)</h3>
+<table>
+<thead>
+<tr>
+<th>Capability</th>
+<th>What it is</th>
+<th>Module</th>
+<th>On main</th>
+<th>Called by</th>
+<th>Note</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Verifiable geometry solver</strong></td>
+<td>exact <code>a+b·π</code> shaded-area engine + partition verifier</td>
+<td><code>math/geometry.rs</code></td>
+<td>yes</td>
+<td><strong>nothing</strong> (only a test content-bond)</td>
+<td>intended driver = image→scene pipeline that isn't on main</td>
+</tr>
+<tr>
+<td>Chord/harmony math</td>
+<td><code>autochord</code></td>
+<td><code>math/autochord.rs</code></td>
+<td>yes</td>
+<td><strong>nothing</strong></td>
+<td>0 non-test refs</td>
+</tr>
+<tr>
+<td>Arrangement math</td>
+<td><code>arrangement</code></td>
+<td><code>math/arrangement.rs</code></td>
+<td>yes</td>
+<td>~1 ref</td>
+<td>near-orphan</td>
+</tr>
+</tbody>
+</table>
+<h3>ABSENT-FROM-MAIN — not present; branch-only or roadmap-only</h3>
+<table>
+<thead>
+<tr>
+<th>Capability</th>
+<th>What it is</th>
+<th>Where it actually is</th>
+<th>Note</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Off-ness / Cattle Dog</strong></td>
+<td>off-topic/nonsense herding, answer-mediation safety layer</td>
+<td><code>feature/op-offness-1-cattledog-port</code> (<code>src/offness.rs</code>, <code>eval/offness/</code>, <code>examples/offness_harness.rs</code>)</td>
+<td>large stale-base port, not a rewire</td>
+</tr>
+<tr>
+<td><strong>Code generation / coding functions</strong></td>
+<td>write/generate code</td>
+<td><em>nowhere</em> — only <code>query_router.code_intent</code> intent slot + roadmap internal notes</td>
+<td>detector present, generator absent</td>
+</tr>
+<tr>
+<td><strong>Image→geometry autonomous pipeline</strong></td>
+<td>perceive diagram → Scene → exact solve</td>
+<td>Python prototypes + <code>v4</code> worktree</td>
+<td>solver core is on main but orphaned (see <span style='display:inline-block;padding:1px 7px;border-radius:10px;font-weight:700;font-size:0.82em;color:#9a4a00;background:#ffe4cc;white-space:nowrap;'>ORPHANED</span>)</td>
+</tr>
+<tr>
+<td>Embedding system</td>
+<td>vector embeddings</td>
+<td><code>feature/op-offness-1-cattledog-port</code> (<code>src/embedding.rs</code>)</td>
+<td>branch-only; not on main</td>
+</tr>
+<tr>
+<td>Corpus loaders</td>
+<td>arXiv / Grokopedia / StackExchange ingest</td>
+<td><code>feature/{arxiv,grokopedia,stackexchange}-loader</code>, <code>feature/wire-cat1-loaders</code></td>
+<td>branch-only feeders</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2>Part 3 — Totals (the true scope at a glance)</h2>
+<ul>
+<li><strong>LIVE-GUEST:</strong> 7 capabilities a real user can actually reach.</li>
+<li><strong>CONDITIONAL:</strong> 6 wired into <code>narrate()</code> but heuristic-gated (incl. the need-identifier itself).</li>
+<li><strong>DARK-ADMIN:</strong> ~20 capability groups fully built and compiled in, reachable only through the admin tool surface — spanning the entire <code>lu4d_*</code> catalog (<strong>99 tool string literals; ~40 top-level dispatch arms</strong>), of which the guest exposes exactly <strong>3</strong> (<code>lu4d_ask</code>, <code>lu4d_session_start</code>, <code>lu4d_session_end</code>).</li>
+<li><strong>ORPHANED:</strong> 3 (geometry solver, autochord, arrangement) — built, verified in isolation, zero callers.</li>
+<li><strong>ABSENT-FROM-MAIN:</strong> 5 (Cattle Dog, code-gen, image→geometry loop, embeddings, corpus loaders).</li>
+</ul>
+<p><strong>Headline ratio:</strong> guest surface = <strong>3 of ~40</strong> tools; <strong>1 of 4</strong> math systems; <strong>0</strong> file/document/image/research/sandbox capability reachable by a user. Almost the entire capability estate is present-and-compiled but dark, because the guest binary compiles the tool dispatch out and <code>guest_ask</code> only wires arithmetic + <code>narrate()</code>.</p>
+<hr />
+<h2>Part 4 — Honesty ledger: absent vs merely unwired</h2>
+<ul>
+<li><strong>Genuinely <span style='display:inline-block;padding:1px 7px;border-radius:10px;font-weight:700;font-size:0.82em;color:#8a1220;background:#fbd6da;white-space:nowrap;'>ABSENT</span> (not built on main):</strong> code generation (only a router intent slot); Cattle Dog / off-ness (branch only); the image→geometry autonomous loop (prototype/v4); embeddings (branch only).</li>
+<li><strong>Built but <span style='display:inline-block;padding:1px 7px;border-radius:10px;font-weight:700;font-size:0.82em;color:#9a4a00;background:#ffe4cc;white-space:nowrap;'>ORPHANED</span> (no caller anywhere):</strong> the verifiable-geometry solver; autochord; arrangement.</li>
+<li><strong>Built and <span style='display:inline-block;padding:1px 7px;border-radius:10px;font-weight:700;font-size:0.82em;color:#0b4a8a;background:#d6e6fb;white-space:nowrap;'>DARK-ADMIN</span> (works, but users can't reach it):</strong> sandbox/execution runtime, image/vision tools, file tools, document (PDF/DOCX) tools, full calculator + construction + word-problem math, web research, teach/ingest, session-memory reader/writer, style, trust, scar, time, sense, hub, idle, pending — essentially the whole <code>lu4d_*</code> catalog.</li>
+<li><strong>Built and <span style='display:inline-block;padding:1px 7px;border-radius:10px;font-weight:700;font-size:0.82em;color:#8a5a00;background:#fdeecb;white-space:nowrap;'>CONDITIONAL</span> (fires sometimes on guest):</strong> reasoning chains, Left-Brain thinking, multi-agent, variants, curiosity producer, and the query router (6/9 flags consumed).</li>
+<li><strong>LIVE for users:</strong> recall, idk floor, graph-walker, greet refusal, regular arithmetic, self/meta short-circuits, renderer.</li>
+</ul>
+<p><strong>The single most leveraged reconnection</strong> is not any one tool — it is teaching <code>narrate()</code>/<code>guest_ask</code> to <em>act on the router flags it already computes</em>. <code>references_file_path</code>, <code>references_image_path</code>, and <code>code_intent</code> are detected on every query and consumed by nothing. Wire those (plus thread <code>session_id</code>), and the file, document, image, and — once built — code capabilities light up through the need-identifier that already exists. That is the architecture that turns Lu from a recall engine into an agent.</p>
+<hr />
+<h2>Provenance (all read-only this session, <code>main</code> @ <code>d51d62f</code>)</h2>
+<ul>
+<li>Tool catalog: <code>src/mcp.rs</code> dispatch (99 <code>lu4d_*</code> literals); guest surface <code>crates/lu_guest_http/src/guest_mcp.rs</code> (3 tools).</li>
+<li>Module census: <code>src/lib.rs</code> (only <code>mcp</code> is <code>#[cfg(feature="admin_mcp")]</code>); <code>src/math.rs</code> + <code>src/math/*</code>; <code>src/{file_io,mcp_file_io,mcp_vision}.rs</code> + <code>src/vision/*</code>; <code>src/capability_runtime/*</code>, <code>src/capability_pack/*</code>, <code>src/pack/*</code>, <code>src/mcp_cat5.rs</code>, <code>src/mcp_cap_runtime.rs</code>, <code>src/mcp_pack.rs</code>.</li>
+<li>Need-identifier: <code>src/query_router.rs</code> (RoutingDecision fields + header intent), <code>src/{thinking,agents,reasoning}.rs</code>.</li>
+<li>Math cascade: <code>src/mcp.rs:1539-1660</code> (<code>try_arithmetic_response_with</code>); geometry caller search tree-wide (only <code>narration.rs:3778</code> test bond).</li>
+<li>Branch survey: <code>git branch -a</code> (143 branches); <code>git diff --stat main feature/op-offness-1-cattledog-port</code> (offness.rs, embedding.rs branch-only).</li>
+<li>Companion: <code>docs/LIVE_PATH_WIRING_MAP.md</code> (#1352). Retrain <code>lu4d-cat1-ingest</code> = active/undisturbed.</li>
+</ul></div></body></html>

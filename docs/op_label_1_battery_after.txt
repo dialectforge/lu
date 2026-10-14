@@ -1,0 +1,92 @@
+OP-007 read-only reader: nodeintern sidecar merged (52265912 bindings) from /var/lib/lu/brain-v5-20260615-sst/wal/nodeintern.bin
+== read-only reader up. node_label_source=true ==
+
+  word=dog bucket_len=22718
+────────────────────────────────────────────────────────
+Q: What is a dog
+A: an off-leash dog park located at the township municipal is Marlboro. There's a gap nearby — I have thin coverage around an unincorporated community in Stark County.
+   [shape=Definition intent=Definition seeds=1 activated=10 bonds_evaluated=199 4.99s]
+   [labels: 10/10 resolved, 0 blank; store_errors=0]
+     1. "an off-leash dog park located at the township municipal" (act=0.6000 d=0)
+     2. "Marlboro" (act=0.0088 d=1)
+     3. "a rural area consisting of dairy" (act=0.0017 d=2)
+     4. "laid out in 1827" (act=0.0017 d=2)
+
+  word=def bucket_len=986
+  word=keyword bucket_len=5000
+  word=python bucket_len=20816
+────────────────────────────────────────────────────────
+Q: what does the def keyword do in python
+A: I don't have a strong anchor for any of the terms in your query. The strongest match activated at 0.600 (below my confidence threshold for committing to a multi-concept answer). I won't fabricate a connection between weakly-anchored tokens.
+   [shape=Refusal intent=Generic seeds=3 activated=10 bonds_evaluated=129 6.59s]
+   [labels: 9/10 resolved, 1 blank; store_errors=0]
+     1. "Playoff game Four- Australia 79 def France 70" (act=0.6000 d=0)
+     2. "" (act=0.3600 d=0)
+     3. "Parser implementation in Python" (act=0.2100 d=0)
+     4. "Australia national men's roller derby team" (act=0.0241 d=1)
+
+  word=binary bucket_len=15110
+  word=search bucket_len=36440
+  word=tree bucket_len=52948
+────────────────────────────────────────────────────────
+Q: what is a binary search tree
+A: Binary search algorithm is a approximately equal to  iterations.
+   [shape=Definition intent=Definition seeds=3 activated=10 bonds_evaluated=129 6.90s]
+   [labels: 10/10 resolved, 0 blank; store_errors=0]
+     1. "Binary search algorithm" (act=0.6000 d=0)
+     2. "Binary search tree" (act=0.3600 d=0)
+     3. "Binary tree" (act=0.2100 d=0)
+     4. "number of elements in the array" (act=0.1417 d=1)
+
+  word=recursion bucket_len=1794
+  word=stack bucket_len=12582
+  word=memory bucket_len=42976
+────────────────────────────────────────────────────────
+Q: how does recursion use stack memory
+A: how does recursion use stack memory works in 3 steps: first , then , then .
+   [shape=Process intent=Process seeds=3 activated=10 bonds_evaluated=37 6.70s]
+   [labels: 6/10 resolved, 4 blank; store_errors=0]
+     1. "" (act=0.6000 d=0)
+     2. "" (act=0.3600 d=0)
+     3. "" (act=0.2100 d=0)
+     4. "" (act=0.0353 d=1)
+
+  word=hash bucket_len=11156
+  word=table bucket_len=61960
+────────────────────────────────────────────────────────
+Q: what is a hash table
+A: Distributed hash table is hash table.
+   [shape=Definition intent=Definition seeds=3 activated=10 bonds_evaluated=52 5.92s]
+   [labels: 8/10 resolved, 2 blank; store_errors=0]
+     1. "Distributed hash table" (act=0.6000 d=0)
+     2. "hash table" (act=0.3600 d=0)
+     3. "Concurrent hash table" (act=0.2100 d=0)
+     4. "usually an efficient implementation" (act=0.0683 d=1)
+
+  word=python bucket_len=20816
+  word=language bucket_len=140142
+────────────────────────────────────────────────────────
+Q: Tell me about the python launguage
+A: Python (programming language) relates to Python language. I'm inferring this from Python (programming language) people — both are connected through that intermediate. Confidence: 0.50. There's a nearby gap I haven't filled in. (I read "launguage" as "language".)
+   [shape=Synthesis intent=Generic seeds=3 activated=10 bonds_evaluated=181 5.97s]
+   [labels: 7/10 resolved, 3 blank; store_errors=0]
+     1. "Python (programming language)" (act=0.6000 d=0)
+     2. "Python (programming language) people" (act=0.3600 d=0)
+     3. "Python language" (act=0.2100 d=0)
+     4. "" (act=0.0714 d=1)
+
+  word=capacitance bucket_len=538
+────────────────────────────────────────────────────────
+Q: how do capacitance and flurgle and zorbnak relate
+A: I recognize "capacitance" but "flurgle" and "zorbnak" don't match anything in my brain. I won't fabricate a connection between them.
+   [shape=Refusal intent=Process seeds=1 activated=2 bonds_evaluated=2 1.76s]
+   [labels: 2/2 resolved, 0 blank; store_errors=0]
+     1. "a large source of capacitance in a diode" (act=0.6000 d=0)
+     2. "potential barrier" (act=0.0571 d=1)
+
+────────────────────────────────────────────────────────
+Q: what is a flurgle
+A: I don't have meaningful information about that. The terms in your query don't match my brain strongly. Nothing in my brain matched the words in your query.
+   [shape=Refusal intent=Definition seeds=0 activated=0 bonds_evaluated=0 0.06s]
+   [labels: 0/0 resolved, 0 blank; store_errors=0]
+

@@ -1,0 +1,44 @@
+# Rust build artifacts
+/target
+
+# Brain data files — NEVER commit (data, not code)
+*.lbr
+*.lbr.bak
+
+# Run logs
+*.log
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Misc
+*.tmp
+.claude/scheduled_tasks.lock
+
+# Sub-agent scratch
+*.bak
+scripts/iter*_workspace/
+scripts/smart_extractor_sample_bonds*.jsonl
+
+# Glossary build artifacts (OP-023)
+build/
+
+# Added for open-source release
+*.wal
+.env
+.env.*
+*.p8
+*.pem
+*.key
+master.key
+*.db
+*.sqlite

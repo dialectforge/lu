@@ -1,0 +1,41 @@
+Albedo
+
+Albedo is the fraction of sunlight that is diffusely reflected by a body. It is measured on a scale from 0 (corresponding to a black body that absorbs all incident radiation) to 1 (corresponding to a body that reflects all incident radiation). Surface albedo is defined as the ratio of radiosity to the irradiance received by a surface.
+
+The term was introduced into optics by Johann Heinrich Lambert in his 1760 work Photometria. The word originates from the Latin term albus, meaning white. The reflectance of a surface depends on the wavelength of the radiation being reflected.
+
+Surface albedo varies considerably across the Earth, with the highest values found over fresh snow and the lowest values over fresh asphalt and water. Average ocean albedo is about 0.06, while snow may have albedo close to 0.9. Earth has an average albedo of about 0.3.
+
+Terrestrial albedo
+
+Albedos of typical materials in visible light range from up to 0.9 for fresh snow to about 0.04 for charcoal, one of the darkest substances. The albedo of the Moon's surface is about 0.12. Mars has an average albedo of approximately 0.25.
+
+Astronomical albedo
+
+In astronomy, the albedo is the fraction of light reflected by a planet, moon or small body in the Solar System. The Bond albedo is the fraction of power in the total electromagnetic radiation incident on an astronomical body that is scattered back out into space.
+
+The Moon has a relatively low albedo. Venus has a high albedo of about 0.76 due to its thick cloud cover. Saturn's icy moon Enceladus has the highest albedo of any body in the Solar System.
+
+See also
+
+ Bidirectional reflectance distribution function
+ Cool roof
+ Daisyworld
+ Emissivity
+ Global dimming
+ Irradiance
+ Solar reflectance index
+
+References
+
+External links
+
+NASA MODIS BRDF and albedo product site
+A discussion of Lunar albedos
+Goddard Earth Sciences Data
+
+Climatology
+Radiometry
+Meteorological quantities
+Scattering
+Albedo

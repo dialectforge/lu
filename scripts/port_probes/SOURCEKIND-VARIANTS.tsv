@@ -1,0 +1,12 @@
+lu4d_revoke_by_source	{"kind":"chained_research","dry_run":true}
+lu4d_revoke_by_source	{"kind":"session_promote","dry_run":true}
+lu4d_revoke_by_source	{"kind":"pack_install","dry_run":true}
+lu4d_revoke_by_source	{"kind":"chained_research","chain_id":"none-such","dry_run":true}
+lu4d_revoke_by_source	{"kind":"session_promote","session_id":"99999","dry_run":true}
+lu4d_revoke_by_source	{"kind":"pack_install","pack_id":"none-such","dry_run":true}
+lu4d_source_attribution_migrate	{}
+lu4d_source_attribution_migrate	{"dry_run":true}
+lu4d_revoke_by_source	{"kind":"research","wonder_seed":"none-such","dry_run":true}
+lu4d_revoke_by_source	{"kind":"teach","actor":"none-such","dry_run":true}
+lu4d_status	noop
+lu4d_pending_status	noop

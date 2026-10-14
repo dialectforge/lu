@@ -1,0 +1,40 @@
+[package]
+name = "lu_guest_http"
+version = "0.1.0"
+edition = "2021"
+description = "OP-007 / Port U public-facing guest HTTP shim for Lu 4D. Localhost-only scaffold; exposes ONLY lu4d_ask + session tools, routed through a guest MCP trust gate. Admin tools are physically absent (lu4d built with default-features=false, so the admin `mcp` module is compiled out)."
+authors = ["John <info@dialectforge.com>"]
+
+# Own workspace root: this crate is deliberately EXCLUDED from the root
+# lu4d workspace so Cargo feature unification can never re-enable the
+# `admin_mcp` feature on the lu4d dependency during a `--workspace`
+# build. That guarantees the admin `mcp` module is compiled out of this
+# binary regardless of how it is built. See OP-007 privsep property.
+[workspace]
+
+[[bin]]
+name = "lu_guest_http"
+path = "src/main.rs"
+
+[dependencies]
+# The guest binary links the lu4d LIB for the Brain + narrate/ask
+# pipeline ONLY. default-features = false drops the `admin_mcp` feature,
+# so `lu4d::mcp` (the full admin tool surface) is NOT compiled in.
+lu4d = { path = "../..", default-features = false }
+
+# Sanctioned web layer (OP-007 allows axum/hyper/warp). axum is chosen
+# for ergonomic routing over the small guest API surface; it sits on
+# hyper/tower. The async runtime is confined to this crate and does not
+# touch the synchronous lu4d core (Brain is accessed under a std Mutex
+# inside handlers, never held across an .await).
+axum = "0.7"
+tokio = { version = "1", features = ["rt-multi-thread", "net", "macros", "signal"] }
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+rand = "0.8"
+
+[dev-dependencies]
+# Test-only: temp brain fixtures. Not linked into the guest binary.
+tempfile = "3"

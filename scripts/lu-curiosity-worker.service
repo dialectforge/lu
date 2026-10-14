@@ -1,0 +1,59 @@
+[Unit]
+Description=Lu curiosity FILL worker (admin-side, no network listener)
+Documentation=https://github.com/dialectforge/Lu-4.0
+Documentation=file:///opt/lu/lu/v4/docs/CURIOSITY.md
+
+# HARD INVARIANT -- THREE MUTUALLY EXCLUSIVE TENANTS.
+# Loading the 233 GiB v5 brain peaks around 54 GiB and settles near 26
+# GiB on a 62 GiB box. Serving, training and this worker each need their
+# own full load, so no two of them can hold the canonical brain at once.
+# Enforced here, not merely documented:
+Conflicts=lu-guest-http.service lu4d-starcoderdata-ingest.service lu4d-curriculum-ingest.service
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=dialectforge
+Group=dialectforge
+SupplementaryGroups=lu
+WorkingDirectory=/opt/lu
+
+# The FILL half is a WRITER. That is the whole point of it being a
+# separate process from the public guest: the guest keeps
+# ReadOnlyPaths=/var/lib/lu and gains no brain-write capability, and this
+# unit -- which has no listening socket and is unreachable from the
+# network -- does the writing.
+ExecStart=/usr/local/bin/lu_curiosity_worker \
+    --brain /var/lib/lu/brain-v5-20260615-sst \
+    --keyfile /var/lib/lu/master.key \
+    --wonder-queue /var/lib/lu-wonder \
+    --ticks 10
+
+# --auto-apply is DELIBERATELY ABSENT. Without it every fill lands as a
+# Pending change awaiting lu4d_approve_changes. Adding it lets Lu write
+# its own long-term memory unattended; that is a decision for John, not a
+# default. See docs/CURIOSITY.md "The approval gate".
+
+# RAM guard. Same shape as the serving unit: a backstop, not a licence to
+# co-run.
+MemoryHigh=44G
+MemoryMax=50G
+MemorySwapMax=4G
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+# The two paths this unit may write: the brain (it is the writer) and the
+# wonder journal (it compacts consumed entries out of it).
+ReadWritePaths=/var/lib/lu /var/lib/lu-wonder
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+
+[Install]
+# Deliberately NOT WantedBy=multi-user.target. Run on demand, or via
+# lu-curiosity-cycle.sh -- a unit that starts itself at boot would race
+# the serving unit for the brain.

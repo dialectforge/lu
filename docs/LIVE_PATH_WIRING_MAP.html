@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang='en'><head><meta charset='utf-8'><title>Lu &mdash; Live-Path Faculty Wiring Map</title><style>
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; margin:0; padding:0; background:#fff; color:#222; }
+  .topbar { background:#1b1f23; color:#fff; padding:14px 24px; position:sticky; top:0; z-index:10; box-shadow:0 2px 4px rgba(0,0,0,0.1); }
+  .topbar h1 { margin:0; font-size:18px; font-weight:600; }
+  .topbar .meta { font-size:12px; color:#9aa0a6; margin-top:4px; font-family:'SF Mono','Menlo','Monaco','Consolas',monospace; }
+  .container { max-width:1180px; margin:0 auto; padding:24px; }
+  code, .mono { font-family:'SF Mono','Menlo','Monaco','Consolas',monospace; }
+  .tldr { background:#fff8e1; border-left:3px solid #f9b800; border-radius:0 6px 6px 0; padding:14px 18px; margin-bottom:28px; font-size:14px; line-height:1.55; color:#4a3b00; }
+  .tldr strong { color:#422e00; }
+  h2.sec { font-size:16px; border-bottom:1px solid #d0d7de; padding-bottom:6px; margin-top:34px; }
+  .legend { font-size:12px; color:#57606a; margin:8px 0 20px; }
+  .pill { display:inline-block; font-size:11px; font-weight:600; padding:2px 8px; border-radius:10px; margin-right:4px; white-space:nowrap; }
+  .live { background:#dafbe1; color:#1a7f37; border:1px solid #aceebb; }
+  .cond { background:#fff4d6; color:#9a6700; border:1px solid #f5d58b; }
+  .dark { background:#ffe3e3; color:#b42318; border:1px solid #ffc9c9; }
+  .absent { background:#e6e6e6; color:#444; border:1px solid #c9c9c9; }
+  details.fac { border:1px solid #d0d7de; border-radius:6px; margin-bottom:10px; overflow:hidden; }
+  details.fac[open] { box-shadow:0 1px 3px rgba(0,0,0,0.06); }
+  details.fac > summary { cursor:pointer; list-style:none; padding:11px 16px; font-size:14px; background:#f6f8fa; display:flex; align-items:center; gap:10px; }
+  details.fac > summary::-webkit-details-marker { display:none; }
+  details.fac > summary .num { color:#8c959f; font-family:'SF Mono',monospace; font-size:12px; min-width:22px; }
+  details.fac > summary .name { font-weight:600; flex:1; }
+  .facbody { padding:14px 18px; font-size:13.5px; line-height:1.55; border-top:1px solid #d0d7de; }
+  .facbody .row { margin:5px 0; }
+  .facbody .lbl { display:inline-block; min-width:118px; color:#57606a; font-weight:600; vertical-align:top; }
+  .facbody code { background:#eff1f3; padding:1px 5px; border-radius:4px; font-size:12px; color:#24292f; }
+  .edge-l { border-left:4px solid #1a7f37; }
+  .edge-c { border-left:4px solid #d4a017; }
+  .edge-d { border-left:4px solid #b42318; }
+  .edge-a { border-left:4px solid #999; }
+  ol.checklist { padding-left:20px; }
+  ol.checklist li { margin:9px 0; font-size:14px; line-height:1.5; }
+  ol.checklist .sz { font-size:11px; font-weight:600; color:#57606a; }
+  .ledger { font-size:13.5px; line-height:1.6; }
+  .ledger li { margin:4px 0; }
+  .foot { font-size:11.5px; color:#8c959f; margin-top:30px; border-top:1px solid #eaecef; padding-top:12px; font-family:'SF Mono',monospace; line-height:1.5; }
+  a { color:#0969da; text-decoration:none; }
+</style></head>
+<body>
+<div class='topbar'>
+  <h1>Lu &mdash; Live-Path Faculty Wiring Map</h1>
+  <div class='meta'>main @ 2ab23eb &middot; /opt/lu/lu/merge-main &middot; 2026-07-23 &middot; read-only trace of the guest &amp; admin ask paths</div>
+</div>
+<div class='container'>
+
+<div class='tldr'>
+<strong>The fracture in one paragraph.</strong> Before <strong>OP-007 privsep (commit <code>85c593f</code>, 2026-07-18)</strong> Lu was <strong>one binary</strong> exposing ~40 MCP tools, each wiring a faculty onto the surface a user hit &mdash; the "good-responses" version John remembers. The split made two binaries: an <strong>admin</strong> binary (all tools) and a <strong>public/guest</strong> binary built <code>default-features = false</code>, which <strong>physically compiles <code>src/mcp.rs</code> out</strong>. The guest exposes only <code>lu4d_ask</code> + session tools, and <code>lu4d_ask</code> routes through one call: <code>Brain::narrate(query, depth, top_k, false)</code>. Every faculty whose positive handler lived in <code>mcp.rs</code> (full math, the Q.3 session-memory pre-pass, explicit think/reason tools) was <strong>stranded off the live path</strong>. At split time <code>narrate()</code> read the router observation-only, so faculties couldn't switch on. Since then (OP-ROUTE-3a/3b/3c + today's OP-ROUTE-GUEST) reasoning, variants, critic-vetting, agentic-thinking and arithmetic have been re-wired into <code>narrate()</code> one at a time. <strong>Still stranded on guest:</strong> context/session memory (Q.3), full math, a running curiosity fill worker; confidence is globally degraded to <em>Unverified</em> on loaded v5 brains; off-ness/Cattle Dog <strong>never existed on main</strong>. <strong>Hypothesis "good = full binary, guest = crippled": CONFIRMED, dated to <code>85c593f</code>.</strong>
+</div>
+
+<h2 class='sec'>Entry points</h2>
+<div class='facbody' style='border:1px solid #d0d7de;border-radius:6px;'>
+<div class='row'><span class='lbl'>GUEST (live)</span> <code>crates/lu_guest_http/src/main.rs:104</code> loads brain <strong>read-only</strong> &rarr; <code>guest_mcp.rs:70</code> dispatch (3 tools) &rarr; <code>guest_ask</code> (<code>:107</code>): arithmetic intercept (<code>:129</code>) &rarr; greet guard (<code>:160</code>) &rarr; <strong><code>brain.narrate(q,depth,top_k,false)</code></strong> (<code>:175</code>) &mdash; the entire cognitive surface.</div>
+<div class='row'><span class='lbl'>ADMIN (dev)</span> <code>src/mcp.rs</code> dispatch (~<code>:1393</code>), ~40 tools incl. <code>tool_ask</code>(2157) <code>tool_narrate</code>(3243) <code>tool_reason</code>(3708) <code>lu4d_think/multi_think</code>, <code>lu4d_session_memory_*</code> (<code>mcp_lb.rs</code>). Built with <code>default=[admin_mcp]</code> &mdash; <strong>compiled out of guest</strong>.</div>
+<div class='row'><span class='lbl'>narrate() pipe</span> <code>narration.rs</code>: repair(2871) &rarr; classify(2960) &rarr; route(2963) &rarr; self/meta short-circuit(2988) &rarr; <strong>ask/spread/recall</strong>(3086) &rarr; <strong>idk_gate</strong>(3092) &rarr; PASS: multi_think(3149) &middot; reasoning(3160) &middot; variants(3183) &middot; agentic-thinking(3211) &rarr; render 16 shapes.</div>
+</div>
+
+<h2 class='sec'>Faculty wiring &mdash; click to expand</h2>
+<div class='legend'>
+  <span class='pill live'>LIVE</span> wired &amp; invoked &nbsp;
+  <span class='pill cond'>CONDITIONAL</span> wired, gated behind a heuristic/floor &nbsp;
+  <span class='pill dark'>DARK</span> present but never invoked on this path &nbsp;
+  <span class='pill absent'>ABSENT</span> not in main
+</div>
+
+<details class='fac edge-l'><summary><span class='num'>1</span><span class='name'>Seed selection + spread activation</span><span class='pill live'>GUEST LIVE</span><span class='pill live'>ADMIN LIVE</span></summary>
+<div class='facbody'>
+<div class='row'><span class='lbl'>Entry</span> <code>brain.ask_with_config</code> &rarr; <code>network.rs</code> spread; called at <code>narration.rs:3086</code>.</div>
+<div class='row'><span class='lbl'>Gate</span> core, ungated.</div>
+<div class='row'><span class='lbl'>Failure</span> (n/a &mdash; always runs).</div>
+<div class='row'><span class='lbl'>Reconnect</span> &mdash;</div>
+</div></details>
+
+<details class='fac edge-l'><summary><span class='num'>2</span><span class='name'>idk / refusal floor (anti-hallucination)</span><span class='pill live'>GUEST LIVE</span><span class='pill live'>ADMIN LIVE</span></summary>
+<div class='facbody'>
+<div class='row'><span class='lbl'>Entry</span> <code>idk_gate.rs</code> <code>fast_pass_check</code>/<code>evaluate_signals</code>/<code>classify</code>; consulted at <code>narration.rs:3092</code>.</div>
+<div class='row'><span class='lbl'>Gate</span> <code>cfg.idk_gate_enabled</code> (default true).</div>
+<div class='row'><span class='lbl'>Failure</span> fabricated confident "X is a Y" on unknown / adversarial queries.</div>
+<div class='row'><span class='lbl'>Reconnect</span> already wired (OP-014). This is the floor the whole guest surface depends on.</div>
+</div></details>
+
+<details class='fac edge-l'><summary><span class='num'>3</span><span class='name'>recall &rarr; narration graph-walker</span><span class='pill live'>GUEST LIVE</span><span class='pill live'>ADMIN LIVE</span></summary>
+<div class='facbody'>
+<div class='row'><span class='lbl'>Entry</span> <code>narration.rs:1086</code> <code>collect_outgoing</code> + <code>network.rs:1149</code> <code>node_label_or_empty</code>.</div>
+<div class='row'><span class='lbl'>Gate</span> node_store label resolver + read-only-reader residency (OP-LABEL-1/2 LRU).</div>
+<div class='row'><span class='lbl'>Failure</span> <code>" is ."</code> empty nouns; function-word hubs mis-weighted 5&times; (was internal notes.</div>
+<div class='row'><span class='lbl'>Reconnect</span> wired &mdash; but <strong>residency-dependent</strong>: verify the label LRU / node_store stays resident on the RO reader, or content silently empties.</div>
+</div></details>
+
+<details class='fac edge-c'><summary><span class='num'>4</span><span class='name'>reasoning.rs (procedural / list / comparison)</span><span class='pill cond'>GUEST CONDITIONAL</span><span class='pill live'>ADMIN LIVE</span></summary>
+<div class='facbody'>
+<div class='row'><span class='lbl'>Entry</span> <code>reasoning.rs:264</code> <code>reason_with_config</code> (Procedural 308, ThinList 327, Comparison 351).</div>
+<div class='row'><span class='lbl'>Gate</span> refusal path: always; PASS path: <code>routing.needs_deep_reasoning &amp;&amp; !math &amp;&amp; !meta</code> (<code>narration.rs:3160</code>).</div>
+<div class='row'><span class='lbl'>Failure</span> shallow answer &mdash; no why-chain, no enumeration/comparison.</div>
+<div class='row'><span class='lbl'>Reconnect</span> wired OP-ROUTE-3a; broaden the <code>needs_deep_reasoning</code> detector.</div>
+</div></details>
+
+<details class='fac edge-c'><summary><span class='num'>5</span><span class='name'>Left Brain / thinking (Coordinator&ndash;Planner ReAct loop)</span><span class='pill cond'>GUEST CONDITIONAL</span><span class='pill live'>ADMIN LIVE</span></summary>
+<div class='facbody'>
+<div class='row'><span class='lbl'>Entry</span> <code>src/thinking.rs</code> &mdash; ReAct Observe&rarr;Plan&rarr;Act&rarr;Reflect; <code>Brain::think</code>/<code>multi_think</code>. Consumed at <code>narration.rs:3149</code> (critic) &amp; <strong><code>:3211</code></strong> (agentic).</div>
+<div class='row'><span class='lbl'>Gate</span> <code>use_multi_think</code> <strong>hardcoded false</strong> on guest; else <code>needs_critic_vetting</code> OR <code>needs_agentic_thinking</code> + <code>cfg.thinking_min_activation</code> floor.</div>
+<div class='row'><span class='lbl'>Failure</span> no multi-step reasoning on ordinary "tell me about X" &mdash; <strong>this is John's felt "lacking Left Brain."</strong></div>
+<div class='row'><span class='lbl'>Reconnect</span> machinery is wired (OP-ROUTE-3c); raise reachability &mdash; let guest opt into <code>use_multi_think</code> and/or lower the activation floor.</div>
+</div></details>
+
+<details class='fac edge-d' open><summary><span class='num'>6</span><span class='name'>Context / session memory (Q.3 conversational)</span><span class='pill dark'>GUEST DARK</span><span class='pill live'>ADMIN LIVE</span></summary>
+<div class='facbody'>
+<div class='row'><span class='lbl'>Entry</span> store <code>src/lb_session/</code> (mod.rs 1097 LOC, owned by <code>brain.lb_session</code>); Q.3 pre-pass lives in <code>mcp.rs</code> <code>tool_ask</code>/<code>tool_narrate</code> keyed on a <code>session_id</code> arg.</div>
+<div class='row'><span class='lbl'>Gate</span> <code>Brain::narrate</code> (<code>brain.rs:5780</code>) has <strong>no <code>session_id</code></strong>; <code>narrate_inner</code> hardcodes <code>session_id: None</code>. Q.3 rewrite+turn-write are in the compiled-out <code>mcp</code> module.</div>
+<div class='row'><span class='lbl'>Failure</span> "tell me more" / pronoun resolution / "what was my first question?" all fail; <strong>zero continuity</strong>. Guest can <code>session_start/end</code> but nothing reads or writes turns.</div>
+<div class='row'><span class='lbl'>Reconnect</span> thread <code>session_id</code> through <code>narrate</code>&rarr;<code>narrate_inner</code> + port the Q.3 pre-pass into <code>guest_ask</code>. <strong>Medium&ndash;large; highest felt value.</strong></div>
+</div></details>
+
+<details class='fac edge-c'><summary><span class='num'>7</span><span class='name'>Curiosity producer + fill worker</span><span class='pill cond'>GUEST producer</span><span class='pill dark'>FILL DARK</span></summary>
+<div class='facbody'>
+<div class='row'><span class='lbl'>Entry</span> producer: brain detection + <code>guest main.rs:110</code> <code>WonderSidecar</code>; fill: <code>src/bin/lu_curiosity_worker.rs</code> (separate process).</div>
+<div class='row'><span class='lbl'>Gate</span> producer needs guest launched with <code>--wonder-queue</code>; fill = <code>lu-curiosity-worker.service</code>, <strong>currently inactive</strong>.</div>
+<div class='row'><span class='lbl'>Failure</span> gaps detected but never drained &mdash; Lu never grows from what it wonders about.</div>
+<div class='row'><span class='lbl'>Reconnect</span> start the service + launch guest with <code>--wonder-queue</code>. Small (ops).</div>
+</div></details>
+
+<details class='fac edge-d'><summary><span class='num'>8</span><span class='name'>Math: word-problem / geometry / units / stats</span><span class='pill dark'>GUEST arith-only</span><span class='pill live'>ADMIN full</span></summary>
+<div class='facbody'>
+<div class='row'><span class='lbl'>Entry</span> <code>math.rs:177</code> <code>detect_arithmetic</code> (guest) vs <code>math.rs:516</code> <code>detect_math</code> (stats 548 / units 565 / <code>math/geometry.rs</code> / <code>math/wordprob.rs</code>), called only at <strong><code>mcp.rs:1641</code></strong>.</div>
+<div class='row'><span class='lbl'>Gate</span> guest replicated only the arithmetic subset; <code>detect_math</code> is in the compiled-out <code>mcp</code> module.</div>
+<div class='row'><span class='lbl'>Failure</span> "convert 5 km to miles", "area of a circle r=3", word problems &rarr; fall to recall &rarr; idk refusal.</div>
+<div class='row'><span class='lbl'>Reconnect</span> <strong>call <code>lu4d::math::detect_math</code> in <code>guest_ask</code></strong> (<code>math</code> is ungated, already linked). <strong>Small / low-risk &mdash; do this first.</strong></div>
+</div></details>
+
+<details class='fac edge-a'><summary><span class='num'>9</span><span class='name'>Off-ness / Cattle Dog</span><span class='pill absent'>ABSENT from main</span></summary>
+<div class='facbody'>
+<div class='row'><span class='lbl'>Entry</span> <code>offness.rs</code> &mdash; <strong>not present on main</strong>; exists only on branch <code>feature/op-offness-1-cattledog-port</code>.</div>
+<div class='row'><span class='lbl'>Gate</span> never merged.</div>
+<div class='row'><span class='lbl'>Failure</span> no off-topic / nonsense herding.</div>
+<div class='row'><span class='lbl'>Reconnect</span> genuine feature port/merge, not a rewiring. Large. <strong>Confirms the audit @ 2ab23eb.</strong></div>
+</div></details>
+
+<details class='fac edge-c'><summary><span class='num'>10</span><span class='name'>Confidence model</span><span class='pill cond'>GLOBALLY DEGRADED</span></summary>
+<div class='facbody'>
+<div class='row'><span class='lbl'>Entry</span> <code>brain.rs:~11640</code> <code>rehydration_node_stub</code> &rarr; <code>Confidence::Unverified</code>; <code>network.rs:83</code> <code>SeamNode::Stub</code> &rarr; <code>Unverified</code> (and content <code>""</code>).</div>
+<div class='row'><span class='lbl'>Gate</span> any <strong>loaded v5 brain</strong> returns Unverified stubs unless the node is resident. Affects admin &amp; guest alike.</div>
+<div class='row'><span class='lbl'>Failure</span> every answer discloses "Unverified"; confidence-modulated response shapes flatten.</div>
+<div class='row'><span class='lbl'>Reconnect</span> resolve confidence from node_store payload (mirror OP-LABEL-1 for content). Medium.</div>
+</div></details>
+
+<details class='fac edge-c'><summary><span class='num'>11</span><span class='name'>Query router branches</span><span class='pill cond'>now consumed</span></summary>
+<div class='facbody'>
+<div class='row'><span class='lbl'>Entry</span> <code>query_router.rs:28</code> <code>RoutingDecision</code>: <code>needs_math</code>(33) <code>needs_deep_reasoning</code>(45) <code>needs_variants</code>(49) <code>needs_critic_vetting</code>(53) <code>needs_agentic_thinking</code>(68) <code>is_meta_query</code>(77).</div>
+<div class='row'><span class='lbl'>Gate</span> historically observation-only (OP-ROUTE-2); consumption added OP-ROUTE-3a/b/c + GUEST (2026-07-23).</div>
+<div class='row'><span class='lbl'>Failure</span> queries route to recall-only; faculties never switch on (the original post-split state).</div>
+<div class='row'><span class='lbl'>Reconnect</span> mostly done; tune detector precision + activation floors.</div>
+</div></details>
+
+<h2 class='sec'>Reconnection checklist &mdash; priority order</h2>
+<ol class='checklist'>
+<li><strong>Full math on guest (Faculty 8).</strong> Add a <code>lu4d::math::detect_math(query)</code> branch to <code>guest_ask</code> after the arithmetic block. Restores units/stats/geometry/word-problems. <span class='sz'>~15 LOC &middot; low risk &middot; smallest win, highest ratio</span></li>
+<li><strong>Left Brain reachability (Faculty 5).</strong> Let guest opt into <code>use_multi_think</code>, and/or lower <code>thinking_min_activation</code> + broaden <code>needs_agentic_thinking</code>. Machinery is wired; thresholds keep it dark. <span class='sz'>medium</span></li>
+<li><strong>Context / session memory (Faculty 6).</strong> Thread <code>session_id</code> through <code>narrate</code>&rarr;<code>narrate_inner</code>; port the Q.3 pre-pass out of <code>mcp.rs</code> into <code>guest_ask</code>. <span class='sz'>medium&ndash;large &middot; resolves John's #1 complaint</span></li>
+<li><strong>Curiosity fill loop (Faculty 7).</strong> Launch guest with <code>--wonder-queue</code>; re-enable <code>lu-curiosity-worker.service</code>. <span class='sz'>small / ops</span></li>
+<li><strong>Confidence resolution (Faculty 10).</strong> Resolve <code>Confidence</code> from node_store payload like OP-LABEL-1 did for content. <span class='sz'>medium &middot; helps both binaries</span></li>
+<li><strong>Off-ness / Cattle Dog (Faculty 9).</strong> Merge <code>feature/op-offness-1-cattledog-port</code>. <span class='sz'>large &middot; feature port, not a rewire</span></li>
+</ol>
+
+<h2 class='sec'>Honesty ledger &mdash; absent vs merely unwired</h2>
+<ul class='ledger'>
+<li><span class='pill absent'>ABSENT</span> off-ness / Cattle Dog &mdash; only on <code>feature/op-offness-1-cattledog-port</code>.</li>
+<li><span class='pill dark'>DARK on guest</span> Q.3 session-memory pre-pass; full <code>detect_math</code>; curiosity fill (worker inactive).</li>
+<li><span class='pill cond'>CONDITIONAL on guest</span> Left Brain thinking, reasoning chains, variants, critic vetting &mdash; reachable via <code>narrate()</code> router branches but behind heuristics/floors, with <code>use_multi_think</code> hardcoded false.</li>
+<li><span class='pill cond'>DEGRADED (both)</span> confidence &mdash; <code>Unverified</code> stub on loaded v5 brains.</li>
+<li><span class='pill live'>LIVE on guest</span> seed/spread recall, idk floor, recall&rarr;narration walker (residency-dependent), greet refusal, arithmetic, self/meta short-circuits, 16-shape renderer.</li>
+</ul>
+
+<div class='foot'>
+Read-only, this session. Guest: crates/lu_guest_http/src/{main.rs,guest_mcp.rs}. Narrate: src/narration.rs 2863&ndash;3245, 1086&ndash;1130. Router: src/query_router.rs 28&ndash;170.<br>
+Faculties: src/{idk_gate,reasoning,thinking,curiosity,math,confidence,network,brain}.rs, src/math/*, src/lb_session/, src/mcp_lb.rs, src/bin/lu_curiosity_worker.rs.<br>
+Regression root cause: git show 85c593f (OP-007 privsep, 2026-07-18) + OP-ROUTE-GUEST 439e2e8/1734a17/b786356 (2026-07-23), all in main @ 2ab23eb.
+</div>
+
+</div></body></html>

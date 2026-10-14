@@ -1,0 +1,435 @@
+/* Lu portal — mobile-first, dark ground + warm bronze.
+   Palette sampled from luAI.jpeg / lu_thinking_96.gif internal notes:
+   "warm minimal", "dark theme with subtle surface elevation, not flat"). */
+
+:root {
+  --bg:        #0b0b0c;
+  --surface:   #141416;
+  --surface-2: #1b1b1e;
+  --line:      #2a2a2e;
+  --line-soft: #212125;
+  --text:      #ece7e0;
+  --muted:     #9a938a;
+  --faint:     #6f6a63;
+  --accent:    #d2ba94;
+  --accent-dp: #876f54;
+  --warn:      #c88a5a;
+
+  --r-sm: 8px;
+  --r-md: 14px;
+  --r-lg: 20px;
+
+  --tap: 46px;
+
+  --safe-t: env(safe-area-inset-top, 0px);
+  --safe-b: env(safe-area-inset-bottom, 0px);
+  --safe-l: env(safe-area-inset-left, 0px);
+  --safe-r: env(safe-area-inset-right, 0px);
+
+  --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+          "Helvetica Neue", Arial, sans-serif;
+}
+
+* { box-sizing: border-box; }
+
+/* 100% resolves against the LAYOUT viewport, which does not shrink when the
+   software keyboard opens — the bottom-pinned composer would end up under
+   it. 100dvh tracks the dynamic viewport; 100% stays as the fallback for
+   browsers that lack dvh. Paired with interactive-widget=resizes-content
+   in the viewport meta. */
+html, body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  height: 100dvh;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 16px;               /* never below 16px: iOS zooms smaller inputs */
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+  -webkit-text-size-adjust: 100%;
+  overscroll-behavior-y: none;
+}
+
+body { overflow: hidden; }
+
+.noscript {
+  padding: 24px;
+  color: var(--muted);
+  text-align: center;
+}
+
+.app { height: 100%; height: 100dvh; }
+
+.view { display: none; height: 100%; height: 100dvh; }
+.view.is-on { display: flex; }
+/* Last, and !important: a hidden view must never render, whatever else
+   matches. Two visible views at once is the failure this prevents. */
+.view[hidden] { display: none !important; }
+
+/* ============================== LOGIN =============================== */
+
+.view--login {
+  align-items: center;
+  justify-content: center;
+  padding: calc(24px + var(--safe-t)) calc(20px + var(--safe-r))
+           calc(24px + var(--safe-b)) calc(20px + var(--safe-l));
+  overflow-y: auto;
+}
+
+.login {
+  width: 100%;
+  max-width: 380px;
+  text-align: center;
+}
+
+.login__mark {
+  width: 76px;
+  height: 76px;
+  border-radius: var(--r-lg);
+  border: 1px solid var(--line);
+  display: block;
+  margin: 0 auto 18px;
+}
+
+.login__title {
+  margin: 0;
+  font-size: 30px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+
+.login__sub {
+  margin: 6px 0 26px;
+  color: var(--muted);
+  font-size: 15px;
+}
+
+.seg {
+  display: flex;
+  gap: 4px;
+  padding: 4px;
+  margin-bottom: 20px;
+  background: var(--surface);
+  border: 1px solid var(--line-soft);
+  border-radius: var(--r-md);
+}
+
+.seg__btn {
+  flex: 1;
+  min-height: var(--tap);
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 15px;
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease;
+}
+
+.seg__btn.is-on {
+  background: var(--surface-2);
+  color: var(--text);
+  box-shadow: inset 0 0 0 1px var(--line);
+}
+
+.lbl {
+  display: block;
+  margin-bottom: 8px;
+  text-align: left;
+  font-size: 13px;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  color: var(--faint);
+}
+
+.field {
+  width: 100%;
+  min-height: var(--tap);
+  padding: 12px 14px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  color: var(--text);
+  font: inherit;
+  font-size: 16px;
+}
+
+.field:focus {
+  outline: none;
+  border-color: var(--accent-dp);
+  box-shadow: 0 0 0 3px rgba(135, 111, 84, 0.25);
+}
+
+.btn {
+  font: inherit;
+  cursor: pointer;
+  border-radius: var(--r-md);
+  transition: opacity 120ms ease, background 120ms ease;
+}
+
+.btn:disabled { opacity: 0.5; cursor: default; }
+
+.btn--primary {
+  width: 100%;
+  min-height: var(--tap);
+  margin-top: 14px;
+  border: 0;
+  background: var(--accent);
+  color: #17130e;
+  font-weight: 600;
+  font-size: 16px;
+}
+
+.btn--primary:active:not(:disabled) { background: var(--accent-dp); }
+
+.msg {
+  min-height: 20px;
+  margin: 16px 0 0;
+  font-size: 14.5px;
+  color: var(--warn);
+}
+
+.msg:empty { margin-top: 0; }
+
+.fine {
+  margin: 22px 0 0;
+  font-size: 13px;
+  color: var(--faint);
+}
+
+/* =============================== CHAT =============================== */
+
+.view--chat { flex-direction: column; }
+
+.bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 0 0 auto;
+  padding: calc(10px + var(--safe-t)) calc(14px + var(--safe-r)) 10px
+           calc(14px + var(--safe-l));
+  background: var(--surface);
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.bar__mark {
+  width: 30px;
+  height: 30px;
+  border-radius: 9px;
+  border: 1px solid var(--line);
+}
+
+.bar__id { flex: 1 1 auto; min-width: 0; line-height: 1.25; }
+.bar__name { display: block; font-weight: 600; font-size: 16px; }
+
+.bar__who {
+  display: block;
+  font-size: 12px;
+  color: var(--faint);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.btn--ghost {
+  min-height: var(--tap);
+  padding: 0 14px;
+  background: transparent;
+  border: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 14px;
+}
+
+.btn--ghost:active { background: var(--surface-2); }
+
+.banner {
+  flex: 0 0 auto;
+  padding: 10px 16px;
+  background: #241c14;
+  border-bottom: 1px solid #3a2c1e;
+  color: var(--warn);
+  font-size: 14px;
+}
+
+.thread {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior-y: contain;
+  padding: 18px calc(14px + var(--safe-r)) 8px calc(14px + var(--safe-l));
+}
+
+.empty { max-width: 560px; margin: 8vh auto 0; text-align: center; }
+.empty__lead { margin: 0 0 10px; font-size: 18px; color: var(--text); }
+.empty__note { margin: 0; font-size: 14.5px; color: var(--faint); line-height: 1.6; }
+
+.turn { max-width: 720px; margin: 0 auto 18px; }
+
+.turn__who {
+  margin: 0 0 6px;
+  font-size: 11.5px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--faint);
+}
+
+.bubble {
+  padding: 12px 15px;
+  border-radius: var(--r-md);
+  font-size: 16px;
+  overflow-wrap: anywhere;
+}
+
+.bubble p { margin: 0 0 10px; }
+.bubble p:last-child { margin-bottom: 0; }
+
+.turn--you .bubble {
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+}
+
+.turn--lu .bubble {
+  background: transparent;
+  border: 1px solid var(--line-soft);
+  border-left: 3px solid var(--accent-dp);
+}
+
+/* Refusal is a FIRST-CLASS ANSWER, not an error. Distinct, never alarming. */
+.turn--refusal .bubble {
+  background: rgba(210, 186, 148, 0.045);
+  border: 1px dashed rgba(210, 186, 148, 0.34);
+  border-left: 3px solid var(--accent);
+  color: #ddd5c9;
+}
+
+.tag {
+  display: inline-block;
+  margin-bottom: 8px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: rgba(210, 186, 148, 0.12);
+  color: var(--accent);
+  font-size: 11.5px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+/* Trouble = an actual fault (network, server). Visually separate from refusal. */
+.turn--trouble .bubble {
+  background: #1d1614;
+  border: 1px solid #3a2620;
+  color: #d9b3a4;
+}
+
+.sources {
+  margin: 8px 0 0;
+  font-size: 13px;
+  color: var(--faint);
+}
+
+/* Thinking indicator — must survive minute-scale waits (Caddy allows 90s). */
+.thinking { display: flex; align-items: center; gap: 12px; }
+
+.thinking__gif {
+  width: 40px;
+  height: 40px;
+  flex: 0 0 auto;
+  border-radius: 10px;
+}
+
+.thinking__txt { font-size: 15px; color: var(--muted); }
+.thinking__clock { color: var(--faint); font-variant-numeric: tabular-nums; }
+
+@keyframes lu-pulse {
+  0%, 100% { opacity: 0.35; }
+  50%      { opacity: 1; }
+}
+
+/* Static stand-in for the animated GIF; only shown under reduced motion. */
+.thinking__dot {
+  display: none;
+  width: 10px;
+  height: 10px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: lu-pulse 1.25s ease-in-out infinite;
+}
+
+/* ============================= COMPOSER ============================= */
+
+.composer {
+  display: flex;
+  align-items: flex-end;
+  gap: 10px;
+  flex: 0 0 auto;
+  padding: 10px calc(12px + var(--safe-r)) calc(10px + var(--safe-b))
+           calc(12px + var(--safe-l));
+  background: var(--surface);
+  border-top: 1px solid var(--line-soft);
+}
+
+.composer__input {
+  flex: 1 1 auto;
+  min-height: var(--tap);
+  max-height: 34vh;
+  padding: 12px 14px;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  color: var(--text);
+  font: inherit;
+  font-size: 16px;
+  line-height: 1.45;
+  resize: none;
+  overflow-y: auto;
+}
+
+.composer__input:focus {
+  outline: none;
+  border-color: var(--accent-dp);
+}
+
+.composer__input::placeholder { color: var(--faint); }
+
+.btn--send {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: var(--tap);
+  height: var(--tap);
+  border: 0;
+  border-radius: var(--r-md);
+  background: var(--accent);
+  color: #17130e;
+}
+
+.btn--send:active:not(:disabled) { background: var(--accent-dp); }
+
+/* ============================ RESPONSIVE ============================ */
+
+@media (min-width: 700px) {
+  .thread { padding-left: 24px; padding-right: 24px; }
+  .composer { padding-left: 24px; padding-right: 24px; }
+  .bar { padding-left: 24px; padding-right: 24px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * { animation: none !important; transition: none !important; }
+  /* The GIF keeps looping regardless of CSS, so swap it for the dot. */
+  .thinking__gif { display: none; }
+  .thinking__dot { display: block; opacity: 0.85; }
+}
+
+/* OP-CODE-EXEC Phase 6: code-writing surface */
+.code-input{display:block;width:100%;box-sizing:border-box;margin:0 0 6px;padding:8px 10px;border:1px solid rgba(127,127,127,.35);border-radius:8px;font:12px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace;resize:vertical;background:rgba(127,127,127,.06)}
+pre.code{margin:8px 0;padding:10px 12px;background:#0d1117;color:#e6edf3;border-radius:8px;overflow:auto;font:12.5px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace}
+pre.code code{white-space:pre}
+pre.code--out{background:#12241a;color:#c7f5d9}
+.code__out-label{margin:8px 0 2px;font-weight:600;opacity:.85}
+.code__dl{margin-top:8px}

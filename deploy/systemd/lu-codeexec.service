@@ -1,0 +1,13 @@
+[Unit]
+Description=Lu code-exec broker (privilege-separated X1 sandbox runner for the owner-gated guest)
+After=network-online.target
+[Service]
+Type=simple
+User=dialectforge
+Group=dialectforge
+SupplementaryGroups=lu
+ExecStart=/usr/local/bin/lu_codeexec /run/lu-codeexec/sock
+Restart=on-failure
+RestartSec=5
+[Install]
+WantedBy=multi-user.target

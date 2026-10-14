@@ -1,0 +1,96 @@
+# Lu OP-007 / Port U public TLS edge for lu.dialectforge.com
+#
+# Terminates TLS (Let's Encrypt, HTTP-01 — valid while Cloudflare is GREY /
+# DNS-only) and reverse-proxies the API to the LOCALHOST-only guest binary
+# (lu_guest_http on 127.0.0.1:8787). The guest binary is the login gate:
+# POST /auth (owner passphrase or single-use invite code) -> bearer token;
+# POST /mcp requires that token. Caddy adds no auth of its own.
+#
+# Since 2026-07-22 Caddy ALSO serves the static PWA front-end at / from
+# /var/www/lu (source of truth: repo web/). The front-end is plain
+# HTML/CSS/JS with no build step and no dependencies; Caddy serves those
+# bytes verbatim. Static serving and API proxying are split by an explicit
+# path matcher so the API routing cannot be affected by anything the
+# front-end does.
+#
+# Admin surface is NOT here and cannot be: lu_admin_mcp is a separate binary
+# and the admin tool handlers are physically compiled out of lu_guest_http
+# (crates/lu_guest_http/tests/privsep.rs proves it).
+{
+	email info@dialectforge.com
+}
+
+lu.dialectforge.com {
+	encode gzip
+
+	# Site-level, so the API responses that carry the passphrase and the
+	# bearer token get them too — not just the static document.
+	header {
+		-Server
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "no-referrer"
+	}
+
+	# ---- API ---------------------------------------------------------
+	# EXACTLY the three routes lu_guest_http registers. Anything else
+	# falls through to the static handler below and can never reach the
+	# binary.
+	@api path /auth /mcp /health
+	handle @api {
+		# Cloudflare will later impose a 100s proxy timeout when John flips
+		# to orange. Keep our own ceiling below that so a slow query fails
+		# here, visibly, rather than being cut by Cloudflare.
+		reverse_proxy 127.0.0.1:8787 {
+			transport http {
+				response_header_timeout 90s
+				read_timeout 90s
+			}
+		}
+	}
+
+	# ---- Static PWA front-end ----------------------------------------
+	handle {
+		root * /var/www/lu
+
+		# The front-end loads no third-party anything. Locking that in means
+		# an injected string can never become an executing script, and
+		# form-action 'none' stops the login form from default-submitting
+		# the passphrase into the URL bar if app.js ever fails to load.
+		header Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self'; font-src 'self'; connect-src 'self'; manifest-src 'self'; worker-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+
+		# Caddy 2.6 has no built-in MIME type for .webmanifest; without this
+		# it is served as application/octet-stream and the install prompt
+		# never appears.
+		@manifest path /manifest.webmanifest
+		header @manifest Content-Type "application/manifest+json"
+
+		# Everything that changes on deploy must revalidate, or a shipped fix
+		# cannot reach an already-installed client.
+		@code path /sw.js / /index.html /app.js /app.css /manifest.webmanifest
+		header @code Cache-Control "no-cache"
+
+		# Content-addressed only by name, so a week is safe. Deliberately NOT
+		# applied to code above.
+		@media path /icons/* /lu_thinking_96.gif
+		header @media Cache-Control "public, max-age=604800"
+
+		# NOTE: no `try_files … /index.html`. This app has no client-side
+		# routing, so an SPA fallback would only turn every genuine 404 into
+		# a 200 HTML page — served under an asset URL, stamped with the media
+		# cache header above, and then cached by the service worker. Honest
+		# 404s instead.
+		file_server
+	}
+
+	handle_errors {
+		@down expression {err.status_code} in [502, 503, 504]
+		respond @down "Lu is offline for training. The demo returns when the current ingest run completes." 503
+		respond "{err.status_code} {err.status_text}" {err.status_code}
+	}
+
+	log {
+		output file /var/log/caddy/lu.access.log
+		format json
+	}
+}

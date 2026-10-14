@@ -1,0 +1,174 @@
+[package]
+name = "lu4d"
+version = "0.1.0"
+edition = "2021"
+description = "Lu 4D — A temporal knowledge graph system with 4D associative memory"
+authors = ["John <info@dialectforge.com>"]
+
+[features]
+# OP-007 / Port U: gate the admin MCP surface so the public guest binary
+# (crates/lu_guest_http) compiles it out via default-features = false.
+default = ["admin_mcp"]
+admin_mcp = []
+
+[dependencies]
+rand = "0.8"
+num-bigint = "0.4"
+num-rational = "0.4"
+num-traits = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+indexmap = "2"  # OP-REASON-LOOP -- ordered, seed-keyed ContextSet map (already in Cargo.lock @ 2.14.0)
+# Port #10 (Autonomous Research Loop): real synchronous HTTP +
+# real HTML parsing. ureq is blocking and matches Lu's sync model;
+# scraper is the standard Rust DOM-walker built on html5ever.
+# Both pulled to feature-trim only what we need.
+ureq = { version = "2.10", features = ["json", "tls"], default-features = false }
+scraper = { version = "0.20", default-features = false }
+# Storage v2 Phase 1: binary brain format. bincode 1.x is the stable,
+# serde-compatible API; 2.x is a wire-incompatible rewrite we deliberately
+# avoid here so the format is easy to reason about. crc32fast adds the
+# integrity checksum carried in the v2 trailer.
+bincode = "1.3"
+crc32fast = "1.4"
+flate2 = "1"  # Phase-1 geometry perception: pure-Rust PNG inflate (already in Cargo.lock @ 1.1.9)
+# Storage v2 Phase 2.1: rkyv-compatible data types. rkyv 0.7 is the
+# well-trodden line; 0.8 exists but the on-disk wire format is in flux.
+# Slice 1 only adds the type-level machinery (Archive/Serialize/Deserialize
+# derives + a round-trip test). The production load path is still bincode
+# v2 onto the heap via brain_io.rs; Slice 2 owns the mmap + zero-copy
+# load path. The validation feature is required for `check_archived_root`.
+rkyv = { version = "0.7", features = ["validation"] }
+# Storage v2 Phase 2.2 (Slice 2a): mmap-based v3 read path.
+# memmap2 0.9 is the maintained successor to the abandoned `memmap`
+# crate; we only use the read-only `Mmap` flavour. Slice 2a still
+# eager-deserializes onto the heap after rkyv validation, so the mmap
+# is dropped at function return; a future Slice 2c will hold it alive
+# for true zero-copy reads.
+memmap2 = "0.9"
+# Storage v2 Phase 3: per-block zstd compression for the v3 network
+# section. zstd 0.13 is the current stable line; we use the bulk
+# (single-shot) compress/decompress entry points which need only the
+# default features.
+zstd = "0.13"
+
+# OP-PARZSTD (2026-06-01): bounded MPMC channels for the parallel
+# zstd compression pipeline in src/compress.rs. crossbeam-channel
+# 0.5 is the established choice; crossbeam-utils is already in the
+# dep graph (transitively via zip), so this is a small additional
+# surface. Used only for the (work_tx, done_tx) pair inside the
+# scoped-thread compression pool — not exposed to public API.
+crossbeam-channel = "0.5"
+
+# OP-016: bounded LRU cache for decompressed block arena in
+# src/compress.rs. Replaces the monotonic Vec<OnceLock<AlignedVec>>
+# that caused unbounded RssAnon growth during retrain.
+lru = "0.12"
+
+# Storage v2 Phase 4: at-rest encryption. sha2 0.10 is the
+# stable 0.10 line of the RustCrypto digest family (used by
+# the keystream); bip39 2.0 encodes/decodes the 24-word recovery
+# phrase from/to the 32-byte master key (256-bit entropy + 8-bit
+# checksum, the standard largest-shape BIP39 mnemonic).
+sha2 = "0.10"
+bip39 = "2"
+
+# OP-022.a.3: direct dep entry so MADV_DONTNEED on the keyword_index mmap
+# is callable. Version 0.2 is already locked transitively via memmap2.
+libc = "0.2"
+
+# Text extractor port (2026-05-31): regex for the simple Wikipedia
+# patterns; fancy-regex for the L3 lookahead patterns that the
+# standard `regex` crate refuses.
+regex = "1"
+fancy-regex = "0.14"
+
+# Port Cat.4 (signed safety packs): Ed25519 signing/verification.
+# Pinned to the 2.x line; 1.x has a different keypair API.
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+rand_core = { version = "0.6", features = ["std"] }
+
+# Port File-IO: file ingestion/emission across common formats.
+# pdf-extract is the well-trodden text-out-of-PDF crate (built on
+# lopdf + encoding_rs); printpdf 0.7 is the corresponding write
+# path. zip 0.6 handles DOCX (which is just a zip of XML); a tiny
+# hand-rolled XML scanner extracts <w:t> text and emits a minimal
+# valid DOCX archive on write. csv 1.3 covers tabular IO.
+# Everything is pure Rust; no system tools required (constraint C10).
+csv = "1.3"
+pdf-extract = "0.7"
+printpdf = { version = "0.7", default-features = false }
+zip = { version = "0.6", default-features = false, features = ["deflate"] }
+
+[lib]
+name = "lu4d"
+path = "src/lib.rs"
+
+[[bin]]
+name = "lu4d"
+path = "src/main.rs"
+[dev-dependencies]
+# Port CS.1: WAL durability tests use TempDir for isolated brain/wal
+# paths. The crate was already used by brain_io.rs / brain_io_v3.rs /
+# brain.rs test modules but had not been declared explicitly; CS.1
+# adds the formal declaration so the test build resolves cleanly.
+tempfile = "3"
+
+[[bin]]
+name = "op022a_functional_equivalence_harness"
+path = "scripts/op022a_functional_equivalence_harness.rs"
+
+[[bin]]
+name = "op022a21_preposition_sidecar"
+path = "scripts/op022a21_preposition_sidecar.rs"
+
+[[bin]]
+name = "op022_save_spike_diag"
+path = "scripts/op022_save_spike_diag.rs"
+
+[[bin]]
+name = "op022sv4_bench"
+path = "scripts/op022sv4_bench.rs"
+
+[[bin]]
+name = "op_ingest_1_bench"
+path = "scripts/op_ingest_1_bench.rs"
+
+[[bin]]
+name = "parzstd_fixture"
+path = "scripts/parzstd_fixture.rs"
+
+[[bin]]
+name = "parzstd_bench"
+path = "scripts/parzstd_bench.rs"
+
+# OP-BRAIN-V4 Phase 7 (2026-06-01): v3 -> v4 migration CLI.
+[[bin]]
+name = "lu4d_migrate_v3_v5"
+path = "scripts/lu4d_migrate_v3_v5.rs"
+
+# OP-BRAIN-V5 Phase 2.9 (2026-06-09): v3 -> v5 node-side migration CLI.
+[[bin]]
+name = "lu_brain_migrate_v3_v5_node"
+path = "scripts/lu_brain_migrate_v3_v5_node.rs"
+
+# OP-BRAIN-V5 Phase 3.10 (2026-06-10): v3 -> v5 bond-side migration CLI.
+[[bin]]
+name = "lu_brain_migrate_v3_v5_bond"
+path = "scripts/lu_brain_migrate_v3_v5_bond.rs"
+
+# OP-BRAIN-V5 6.7 (2026-06-11): offline v3<->v5 migration verifier CLI.
+[[bin]]
+name = "lu_brain_verify_v3_v5"
+path = "scripts/lu_brain_verify_v3_v5.rs"
+
+
+# OP-BRAIN-V4 Phase 0 (2026-06-01): bench harness as a workspace member.
+# The root crate stays a regular package; we just opt-in to workspace mode
+# so `cargo build --workspace` (and per-crate paths) pick up the new bench
+# crate. v4 phases can add more crates here as we modularize the brain.
+[workspace]
+members = [".", "crates/lu_brain_bench"]
+# OP-007 / Port U: the public guest crate is its own workspace so Cargo
+# feature unification can never re-enable admin_mcp on the lu4d dep.
+exclude = ["crates/lu_guest_http"]

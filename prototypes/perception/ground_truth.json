@@ -1,0 +1,90 @@
+[
+  {
+    "S": 8,
+    "circles": [
+      [
+        0,
+        0,
+        8
+      ]
+    ],
+    "square_units": 8,
+    "template": "quarter",
+    "path": "syn_00_quarter.jpg"
+  },
+  {
+    "S": 10,
+    "circles": [
+      [
+        5,
+        5,
+        5
+      ]
+    ],
+    "square_units": 10,
+    "template": "inscribed",
+    "path": "syn_01_inscribed.jpg"
+  },
+  {
+    "S": 6,
+    "circles": [
+      [
+        0,
+        0,
+        6
+      ],
+      [
+        6,
+        6,
+        6
+      ]
+    ],
+    "square_units": 6,
+    "template": "leaf",
+    "path": "syn_02_leaf.jpg"
+  },
+  {
+    "S": 8,
+    "circles": [
+      [
+        4,
+        0,
+        4
+      ]
+    ],
+    "square_units": 8,
+    "template": "semi",
+    "path": "syn_03_semi.jpg"
+  },
+  {
+    "S": 12,
+    "circles": [
+      [
+        6,
+        6,
+        6
+      ]
+    ],
+    "square_units": 12,
+    "template": "inscribed2",
+    "path": "syn_04_inscribed2.jpg"
+  },
+  {
+    "S": 10,
+    "circles": [
+      [
+        0,
+        0,
+        10
+      ],
+      [
+        10,
+        10,
+        10
+      ]
+    ],
+    "square_units": 10,
+    "template": "leaf2",
+    "path": "syn_05_leaf2.jpg"
+  }
+]
