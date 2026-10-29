@@ -63,7 +63,7 @@ crossbeam-channel = "0.5"
 # OP-016: bounded LRU cache for decompressed block arena in
 # src/compress.rs. Replaces the monotonic Vec<OnceLock<AlignedVec>>
 # that caused unbounded RssAnon growth during retrain.
-lru = "0.12"
+lru = "0.16"
 
 # Storage v2 Phase 4: at-rest encryption. sha2 0.10 is the
 # stable 0.10 line of the RustCrypto digest family (used by
